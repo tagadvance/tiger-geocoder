@@ -1,0 +1,64 @@
+name: tiger-geocoder
+
+services:
+  db:
+    build:
+      context: .
+      args:
+        PG_MAJOR: "${PG_MAJOR:-18}"
+        POSTGIS_MAJOR: "${POSTGIS_MAJOR:-3.6}"
+        TIGER_GEOCODER_VERSION: "${TIGER_GEOCODER_VERSION:-2025.2}"
+    image: tagadvance/tiger-geocoder:${TAG:-dev}
+    shm_size: 1gb
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-geocoder}"
+      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+      PGDATABASE: "${POSTGRES_DB:-geocoder}"
+      TIGER_STATES: "${TIGER_STATES:-}"
+      TIGER_DOWNLOAD_JOBS: "${TIGER_DOWNLOAD_JOBS:-4}"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # Bind mounts, not named volumes, so the loaded database is a directory
+      # you can rsync to another machine.
+      #
+      # PostgreSQL 18 images mount /var/lib/postgresql, not .../data: the server
+      # then keeps its cluster in a major-version subdirectory (18/docker), which
+      # is what lets a future `pg_upgrade --link` to PG19 run without crossing a
+      # mount boundary. Mounting the old path is a hard error on these images.
+      - ./data:/var/lib/postgresql
+      - ./gisdata:/gisdata
+    # The bulk load is overwhelmingly sequential writes of data that can simply
+    # be downloaded again. Trading crash safety for load speed is the right call
+    # here; take these off before treating the result as a system of record.
+    command:
+      - postgres
+      - -c
+      - synchronous_commit=off
+      - -c
+      - maintenance_work_mem=1GB
+      - -c
+      - max_wal_size=8GB
+      - -c
+      - checkpoint_timeout=30min
+      - -c
+      - autovacuum_vacuum_cost_delay=0
+    # Checking pg_isready alone is not enough. If an initdb hook fails, the
+    # entrypoint aborts, restart policy brings the container back, the now
+    # non-empty data directory makes it skip initialization -- and a database
+    # missing every extension reports healthy forever. Prove the schema landed.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready --quiet --username=$${POSTGRES_USER} --dbname=$${POSTGRES_DB}
+          && psql --username=$${POSTGRES_USER} --dbname=$${POSTGRES_DB}
+          --no-align --tuples-only --set ON_ERROR_STOP=1
+          --command "SELECT 1 WHERE to_regproc('api.coverage') IS NOT NULL"
+          | grep --quiet 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped

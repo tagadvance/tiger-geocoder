@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Generate, harden, and run the Census TIGER loader scripts.
+#
+#   tiger-load nation            national county/state layers (do this first)
+#   tiger-load states OH KY      per-state address and street data
+#   tiger-load index             install missing indexes, then vacuum analyze
+#   tiger-load all OH KY         all three, in order
+#
+# States may also come from TIGER_STATES as a comma or space separated list.
+set -euo pipefail
+
+: "${PGDATABASE:=geocoder}"
+: "${PGUSER:=postgres}"
+: "${TIGER_STAGING:=/gisdata}"
+: "${TIGER_PLATFORM:=docker}"
+export PGDATABASE PGUSER
+
+# A missing loader binary is otherwise invisible: the generated script resolves
+# its tools with `command -v` inside an assignment, which under `set -e` aborts
+# the whole load with no output at all. Fail here instead, with a name.
+preflight() {
+  local tool
+  for tool in psql shp2pgsql unzip wget; do
+    if ! command -v "$tool" >/dev/null; then
+      log "required tool not found: ${tool}"
+      exit 69
+    fi
+  done
+}
+
+log() { printf '%s  %s\n' "$(date --utc +%FT%TZ)" "$*" >&2; }
+query() { psql --no-align --tuples-only --no-psqlrc --set ON_ERROR_STOP=1 "$@"; }
+
+# Upstream tells you to add `set -e -u` to the generated script by hand and
+# leaves it there. That is necessary but not sufficient: their loops read
+# `for z in *.zip`, so when a state has no file for a layer -- routine, not an
+# error -- the glob stays literal and unzip fails, taking the whole load with
+# it under -e. nullglob makes the loop body correctly not run at all.
+generate() {
+  local name=$1 sql=$2
+  local script="${TIGER_STAGING}/${name}.sh"
+  log "generating ${name}"
+  {
+    printf '#!/usr/bin/env bash\nset -euo pipefail\nshopt -s nullglob\n'
+    query --command "$sql"
+  } >"$script"
+  chmod +x "$script"
+  printf '%s' "$script"
+}
+
+run() {
+  local script=$1
+  tiger-prefetch "$script"
+  log "running $(basename "$script")"
+  bash "$script"
+}
+
+load_nation() {
+  run "$(generate nation "SELECT loader_generate_nation_script('${TIGER_PLATFORM}')")"
+}
+
+load_states() {
+  local state upper
+  for state in "$@"; do
+    upper=${state^^}
+    run "$(generate "state_${state,,}" \
+      "SELECT loader_generate_script(ARRAY['${upper}'], '${TIGER_PLATFORM}')")"
+    query --command "INSERT INTO api.load_log (state, tiger_year)
+      SELECT '${upper}', tiger_year FROM tiger.loader_variables
+      ON CONFLICT (state) DO UPDATE
+        SET tiger_year = EXCLUDED.tiger_year, loaded_at = now();"
+    log "loaded ${upper}"
+  done
+}
+
+# Without this the geocoder technically works and is unusably slow: the loader
+# creates tables but not all of the indexes the geocode functions rely on.
+build_indexes() {
+  log "installing missing indexes"
+  query --command 'SELECT install_missing_indexes();'
+  # Fed on stdin, not with --command: psql sends a --command string as one
+  # simple query, which puts it in an implicit transaction, and VACUUM cannot
+  # run inside one. Statements read from stdin each run on their own.
+  log "vacuum analyze"
+  psql --no-psqlrc --set ON_ERROR_STOP=1 <<-'SQL'
+	VACUUM (ANALYZE) tiger.addr;
+	VACUUM (ANALYZE) tiger.edges;
+	VACUUM (ANALYZE) tiger.faces;
+	VACUUM (ANALYZE) tiger.featnames;
+	VACUUM (ANALYZE) tiger.place;
+	VACUUM (ANALYZE) tiger.cousub;
+	VACUUM (ANALYZE) tiger.county;
+	VACUUM (ANALYZE) tiger.state;
+	VACUUM (ANALYZE) tiger.zip_lookup_base;
+	VACUUM (ANALYZE) tiger.zip_state;
+	VACUUM (ANALYZE) tiger.zip_state_loc;
+	SQL
+}
+
+require_states() {
+  if [[ $# -eq 0 ]]; then
+    log "no states given; pass them as arguments or set TIGER_STATES"
+    exit 64
+  fi
+}
+
+command=${1:-all}
+shift || true
+states=("$@")
+if [[ ${#states[@]} -eq 0 && -n ${TIGER_STATES:-} ]]; then
+  read -ra states <<<"${TIGER_STATES//,/ }"
+fi
+
+preflight
+
+case "$command" in
+  nation) load_nation ;;
+  states) require_states "${states[@]}"; load_states "${states[@]}" ;;
+  index)  build_indexes ;;
+  all)    require_states "${states[@]}"
+          load_nation
+          load_states "${states[@]}"
+          build_indexes ;;
+  *)      log "usage: tiger-load [nation|states|index|all] [STATE...]"; exit 64 ;;
+esac
+
+log "done"

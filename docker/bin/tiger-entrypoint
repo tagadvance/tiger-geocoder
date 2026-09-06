@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# A bind mount replaces the image's ownership of the staging directory with the
+# host directory's, which is typically root -- and the loader runs as postgres.
+# The image's own chown cannot help, because it happened at build time. Fix it
+# here, while still root, then hand off to the stock entrypoint.
+#
+# Deliberately not recursive: after the first run this directory holds tens of
+# gigabytes of Census downloads already owned by postgres, and walking them on
+# every start would add minutes to boot for no benefit.
+set -euo pipefail
+
+if [[ $(id --user) -eq 0 ]]; then
+  mkdir --parents "${TIGER_STAGING}/temp"
+  chown postgres:postgres "${TIGER_STAGING}" "${TIGER_STAGING}/temp"
+fi
+
+exec docker-entrypoint.sh "$@"

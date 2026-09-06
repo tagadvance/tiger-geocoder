@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Pre-warm the Census download cache for a generated loader script.
+#
+# The generated scripts fetch serially, which is the single biggest cost of a
+# load on a fast link. Rather than rewrite their logic, run the exact wget lines
+# they contain, in parallel, from the same working directory. wget --mirror then
+# finds the files already present and skips them on the real pass.
+set -euo pipefail
+
+script=${1:?usage: tiger-prefetch <generated-script>}
+jobs=${TIGER_DOWNLOAD_JOBS:-4}
+staging=${TIGER_STAGING:-/gisdata}
+
+mapfile -t urls < <(grep --only-matching --extended-regexp \
+  'https?://[^[:space:]]+\.zip' "$script" | sort --unique)
+
+if [[ ${#urls[@]} -eq 0 ]]; then
+  exit 0
+fi
+
+printf 'prefetching %d files with %d workers\n' "${#urls[@]}" "$jobs" >&2
+cd "$staging"
+printf '%s\n' "${urls[@]}" \
+  | xargs --no-run-if-empty --max-procs="$jobs" --max-args=1 \
+      wget --quiet --mirror --reject=html

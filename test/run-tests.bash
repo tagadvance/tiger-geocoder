@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Test suite for the tiger-geocoder image. Runs against the compose stack.
+#
+# Tests are in two tiers: structural ones that pass on an empty database, and
+# data ones that need the nation load plus DC. The data tier is skipped rather
+# than failed when DC is absent, so `make test` is useful immediately after
+# `make up` and gets stricter as data arrives.
+set -euo pipefail
+
+read -ra COMPOSE <<<"${COMPOSE_CMD:-docker compose}"
+passed=0
+failed=0
+skipped=0
+
+query() {
+  "${COMPOSE[@]}" exec --no-TTY --user postgres db \
+    psql --no-align --tuples-only --no-psqlrc --set ON_ERROR_STOP=1 --command "$1"
+}
+
+expect_true() {
+  local name=$1 sql=$2 actual
+  actual=$(query "$sql" | tr --delete '[:space:]')
+  if [[ $actual == "t" ]]; then
+    printf 'ok       %s\n' "$name"
+    passed=$((passed + 1))
+  else
+    printf 'FAIL     %s (got %q)\n' "$name" "$actual"
+    failed=$((failed + 1))
+  fi
+}
+
+skip() {
+  printf 'skip     %s\n' "$1"
+  skipped=$((skipped + 1))
+}
+
+echo "-- structure"
+
+expect_true "postgis_tiger_geocoder is the standalone 2025.x release" \
+  "SELECT extversion LIKE '2025.%' FROM pg_extension WHERE extname = 'postgis_tiger_geocoder'"
+
+expect_true "address_standardizer is installed" \
+  "SELECT count(*) = 1 FROM pg_extension WHERE extname = 'address_standardizer'"
+
+expect_true "tiger is on the database search_path" \
+  "SELECT current_setting('search_path') LIKE '%tiger%'"
+
+expect_true "the docker loader profile exists" \
+  "SELECT count(*) = 1 FROM tiger.loader_platform WHERE os = 'docker'"
+
+expect_true "the loader profile targets the local socket, not localhost" \
+  "SELECT declare_sect LIKE '%/var/run/postgresql%'
+   FROM tiger.loader_platform WHERE os = 'docker'"
+
+expect_true "the TIGER vintage matches the extension release" \
+  "SELECT tiger_year = '2025' AND website_root LIKE '%TIGER2025'
+   FROM tiger.loader_variables"
+
+# Needs no data: pure string parsing. This is the upstream smoke test.
+expect_true "normalize_address parses a street address" \
+  "SELECT streetname = 'Devonshire' AND streettypeabbrev = 'Pl' AND zip = '02109'
+   FROM normalize_address('1 Devonshire Place, Boston, MA 02109')"
+
+expect_true "the api schema is present" \
+  "SELECT count(*) = 3 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'api' AND p.proname IN ('geocode', 'reverse_geocode', 'coverage')"
+
+echo "-- data"
+
+# to_regclass rather than a count: tiger_data does not exist until the first
+# load, and referencing a missing relation is a parse error, not a false.
+if [[ $(query "SELECT to_regclass('tiger_data.state_all') IS NOT NULL" | tr -d '[:space:]') != "t" ]]; then
+  skip "nation data (run: make nation)"
+  skip "DC geocode (run: make load STATES=DC)"
+  skip "DC reverse geocode"
+  skip "coverage reporting"
+else
+  expect_true "the nation load has all states and territories" \
+    "SELECT count(*) = 56 FROM tiger_data.state_all"
+
+  expect_true "the nation load has every county" \
+    "SELECT count(*) BETWEEN 3200 AND 3300 FROM tiger_data.county_all"
+
+  if [[ $(query "SELECT count(*) > 0 FROM api.load_log WHERE state = 'DC'" | tr -d '[:space:]') != "t" ]]; then
+    skip "DC geocode (run: make load STATES=DC)"
+    skip "DC reverse geocode"
+    skip "coverage reporting"
+  else
+    expect_true "geocoding a known DC address lands in DC" \
+      "SELECT count(*) = 1 AND max(state) = 'DC' AND max(rating) <= 20
+       FROM api.geocode('1731 New Hampshire Avenue Northwest, Washington, DC 20010', 1)"
+
+    expect_true "the geocoded point is inside the DC bounding box" \
+      "SELECT bool_and(longitude BETWEEN -77.2 AND -76.9
+                   AND latitude BETWEEN 38.7 AND 39.1)
+       FROM api.geocode('1731 New Hampshire Avenue Northwest, Washington, DC 20010', 1)"
+
+    # The round trip is the real test of both functions: a wrong SRID or a
+    # swapped lon/lat argument passes every check above and fails this one.
+    expect_true "reverse geocoding that point returns the same street" \
+      "WITH forward AS (
+         SELECT longitude, latitude
+         FROM api.geocode('1731 New Hampshire Avenue Northwest, Washington, DC 20010', 1)
+       )
+       SELECT count(*) > 0
+       FROM forward, api.reverse_geocode(forward.longitude, forward.latitude, 1) AS r
+       WHERE r.street ILIKE '%New Hampshire%'"
+
+    expect_true "reverse geocode reports a sane distance" \
+      "WITH forward AS (
+         SELECT longitude, latitude
+         FROM api.geocode('1731 New Hampshire Avenue Northwest, Washington, DC 20010', 1)
+       )
+       SELECT bool_and(r.distance_metres < 1000)
+       FROM forward, api.reverse_geocode(forward.longitude, forward.latitude, 1) AS r"
+
+    # The loader creates tables but not every index geocode() depends on, so a
+    # skipped or failed index step leaves a working-but-unusably-slow geocoder.
+    expect_true "no indexes are missing after the index step" \
+      "SELECT coalesce(missing_indexes_generate_script(), '') = ''"
+
+    expect_true "coverage reports DC" \
+      "SELECT count(*) = 1 FROM api.coverage() WHERE state = 'DC' AND tiger_year = '2025'"
+  fi
+fi
+
+printf '\n%d passed, %d failed, %d skipped\n' "$passed" "$failed" "$skipped"
+[[ $failed -eq 0 ]]
