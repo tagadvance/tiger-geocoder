@@ -1,0 +1,15 @@
+tiger-geocoder
+Copyright 2020-2026 Tag Spilman
+
+This product includes software developed by the PostGIS Project
+(https://postgis.net).
+
+The container image built from this repository bundles PostgreSQL, PostGIS and
+the postgis_tiger_geocoder extension. Those components are distributed under
+their own licenses, principally the GNU General Public License version 2 for
+PostGIS and postgis_tiger_geocoder; their source is available from
+https://postgis.net and https://gitea.osgeo.org/postgis/postgis_tiger_geocoder.
+The Apache License 2.0 covers this repository's own contents only.
+
+TIGER/Line data downloaded by the loader is a work of the United States Census
+Bureau and is in the public domain.
