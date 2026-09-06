@@ -121,12 +121,37 @@ cannot be checked cheaply; `VERIFY_DEEP=true` recovers it by joining `tlid` to
 `./data` and `./gisdata` are bind mounts, not named volumes, specifically so a
 loaded database is an ordinary directory you can move:
 
+First, be sure you actually need to. A state load is reproducible from the
+Census in minutes; only a large multi-state load is worth moving. To set up a
+second host, clone the repo and load there — do not copy `data/` or `gisdata/`.
+
 ```sh
-make snapshot      # stops the database, tars ./data from inside a container
-sudo rsync -a --numeric-ids data/ homelab:/srv/tiger-geocoder/data/
+make snapshot                                   # stops the db, tars ./data
+scp tiger-geocoder-*.tar.zst host:/srv/
+ssh host 'cd /srv && sudo tar --extract --zstd --numeric-owner \
+  --file tiger-geocoder-*.tar.zst'
 ```
 
-Two things are easy to get wrong here.
+`--numeric-owner` on extraction is what keeps the cluster owned by the
+container's uid instead of being remapped to whoever holds that name on the far
+host. Extraction needs root for the same reason.
+
+Plain `rsync` fails on this directory: the cluster is mode 700 owned by uid 999,
+so your login account cannot read it. `sudo rsync` does not fix it either —
+sudo makes rsync run ssh as *root*, which has no key for the far host, and even
+connected, the receiving rsync cannot set uid 999 without root there too. If you
+want rsync anyway, both ends need privilege and it looks like this:
+
+```sh
+sudo rsync -a --numeric-ids \
+  -e 'ssh -i /home/tag/.ssh/id_ed25519 -o UserKnownHostsFile=/home/tag/.ssh/known_hosts' \
+  --rsync-path='sudo rsync' \
+  data/ tag@host:/srv/tiger-geocoder/data/
+```
+
+which additionally needs passwordless sudo for rsync on the far side. The
+snapshot route above avoids all of it, which is why it is the one documented
+first.
 
 The database must be stopped first. A tar of a live `PGDATA` is a torn copy, and
 it will restore cleanly right up until it doesn't.
