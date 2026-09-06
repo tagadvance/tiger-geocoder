@@ -73,12 +73,48 @@ upstream loader fails quietly:
 - **Downloads are serial.** `tiger-prefetch` extracts the script's own wget
   lines and runs them in parallel first; the real pass then finds the files
   cached. Tune with `TIGER_DOWNLOAD_JOBS`.
+- **A load exiting 0 does not mean it loaded everything.** `nullglob` stops a
+  missing file from aborting the run, which necessarily turns it into a silent
+  skip; and county-level layers (`faces`, `featnames`, `edges`, `addr`) are
+  fetched one file per county, so a large state can lose a dozen counties and
+  look entirely healthy. Completeness is therefore asserted against the data, not
+  the exit code — see below.
 - **The index step is not optional.** The loader creates tables but not every
   index the geocode functions rely on. Skip `make index` and you get a geocoder
   that works and is unusably slow.
 
 Data volume is not modest. DC alone is ~100 MB of downloads; a national load is
 in the hundreds of gigabytes once indexed. Load only the states you need.
+
+## Verifying a load
+
+`make load` verifies each state before recording it, and refuses to record one
+that fails: an unverified state stays absent from `api.load_log`, so re-running
+drops its tables and loads it again. You can also check at any time:
+
+```sh
+make verify                        # every state the load log claims to hold
+make verify STATES=OH              # one state
+make verify VERIFY_DEEP=true       # slower, exact; see below
+```
+
+Each layer gets three checks: the table exists, it holds rows, and it covers
+every county the nation load says the state has. A missing layer or a partial
+county set fails the state.
+
+```
+ layer  |   check_name    | ok |      detail
+--------+-----------------+----+-------------------
+ faces  | table_exists    | t  |
+ faces  | not_empty       | t  | 8638 rows
+ faces  | county_coverage | t  | 1 of 1 counties
+```
+
+`ok` of `NULL` means **not checked**, which is deliberately not the same as
+passing. `featnames` and `addr` carry no `countyfp`, so their county coverage
+cannot be checked cheaply; `VERIFY_DEEP=true` recovers it by joining `tlid` to
+`edges`, at the cost of a join between two of the largest tables in the schema.
+`place` has no county dimension at all and stays unchecked either way.
 
 ## Moving a loaded database
 

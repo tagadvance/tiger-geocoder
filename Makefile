@@ -46,6 +46,11 @@ load: ## Load states, e.g. make load STATES="OH KY"
 index: ## Install missing indexes and vacuum analyze
 	$(EXEC) tiger-load index
 
+.PHONY: verify
+verify: ## Completeness report for loaded states (VERIFY_DEEP=true for the slow, exact check)
+	$(COMPOSE) exec --user postgres -e TIGER_VERIFY_DEEP=$(or $(VERIFY_DEEP),false) db \
+		tiger-load verify $(STATES)
+
 .PHONY: psql
 psql: ## Open a psql shell
 	$(EXEC) psql

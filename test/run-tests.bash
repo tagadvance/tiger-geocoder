@@ -65,6 +65,10 @@ expect_true "the api schema is present" \
   "SELECT count(*) = 3 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'api' AND p.proname IN ('geocode', 'reverse_geocode', 'coverage')"
 
+expect_true "the completeness verifier is present" \
+  "SELECT count(*) = 2 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'api' AND p.proname IN ('verify_state', 'state_is_complete')"
+
 echo "-- data"
 
 # to_regclass rather than a count: tiger_data does not exist until the first
@@ -118,6 +122,22 @@ else
     # skipped or failed index step leaves a working-but-unusably-slow geocoder.
     expect_true "no indexes are missing after the index step" \
       "SELECT coalesce(missing_indexes_generate_script(), '') = ''"
+
+    # The load exiting 0 is not evidence of a complete load; this is.
+    expect_true "DC passes completeness verification" \
+      "SELECT api.state_is_complete('DC')"
+
+    expect_true "no completeness check failed for DC" \
+      "SELECT count(*) = 0 FROM api.verify_state('DC') WHERE ok IS FALSE"
+
+    expect_true "every county-level layer covers every DC county" \
+      "SELECT count(*) = 0 FROM api.verify_state('DC', deep => true)
+       WHERE check_name = 'county_coverage' AND ok IS FALSE"
+
+    # A verifier that cannot fail is worthless, so prove it fails on a state
+    # that was never loaded.
+    expect_true "verification rejects a state that was never loaded" \
+      "SELECT NOT api.state_is_complete('RI')"
 
     expect_true "coverage reports DC" \
       "SELECT count(*) = 1 FROM api.coverage() WHERE state = 'DC' AND tiger_year = '2025'"

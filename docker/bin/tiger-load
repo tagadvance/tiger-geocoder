@@ -5,6 +5,7 @@
 #   tiger-load states OH KY      per-state address and street data
 #   tiger-load index             install missing indexes, then vacuum analyze
 #   tiger-load all OH KY         all three, in order
+#   tiger-load verify [OH ...]   completeness report; defaults to every loaded state
 #
 # States may also come from TIGER_STATES as a comma or space separated list.
 set -euo pipefail
@@ -86,6 +87,26 @@ drop_state_tables() {
   \$\$;"
 }
 
+# Exiting 0 is not proof a state loaded completely. nullglob keeps a missing file
+# from aborting the run, which necessarily makes it a silent skip instead, and
+# county-level layers are fetched one file per county -- so a state can lose a
+# dozen counties and still look healthy. Assert completeness against the data
+# before recording the state as loaded, so that a failed load stays absent from
+# api.load_log and the next run drops and reloads it.
+verify_loaded() {
+  local upper=$1
+  local deep=${TIGER_VERIFY_DEEP:-false}
+  if [[ $(query --command "SELECT api.state_is_complete('${upper}', ${deep})") == *t* ]]; then
+    log "${upper} verified complete"
+    return 0
+  fi
+  log "${upper} FAILED verification; not recording it as loaded"
+  psql --no-psqlrc --command \
+    "SELECT layer, check_name, detail FROM api.verify_state('${upper}', ${deep})
+     WHERE ok IS FALSE;" >&2
+  return 1
+}
+
 load_states() {
   local state upper
   for state in "$@"; do
@@ -99,6 +120,10 @@ load_states() {
     drop_state_tables "$upper"
     run "$(generate "state_${state,,}" \
       "SELECT loader_generate_script(ARRAY['${upper}'], '${TIGER_PLATFORM}')")"
+    if ! verify_loaded "$upper"; then
+      log "re-run to retry ${upper}: its tables are dropped and reloaded on retry"
+      exit 65
+    fi
     query --command "INSERT INTO api.load_log (state, tiger_year)
       SELECT '${upper}', tiger_year FROM tiger.loader_variables
       ON CONFLICT (state) DO UPDATE
@@ -131,6 +156,34 @@ build_indexes() {
 	SQL
 }
 
+# Standalone completeness report. With no arguments it checks every state the
+# load log claims to hold, which is the check to run before trusting a database.
+verify_states() {
+  local states=("$@")
+  local deep=${TIGER_VERIFY_DEEP:-false}
+  local failed=0 state
+  if [[ ${#states[@]} -eq 0 ]]; then
+    mapfile -t states < <(query --command "SELECT state FROM api.load_log ORDER BY state")
+  fi
+  if [[ ${#states[@]} -eq 0 ]]; then
+    log "no states loaded"
+    return 0
+  fi
+  for state in "${states[@]}"; do
+    printf '\n== %s ==\n' "${state^^}"
+    psql --no-psqlrc --command \
+      "SELECT layer, check_name, ok, detail FROM api.verify_state('${state^^}', ${deep});"
+    if [[ $(query --command "SELECT api.state_is_complete('${state^^}', ${deep})") != *t* ]]; then
+      failed=$((failed + 1))
+    fi
+  done
+  if [[ $failed -gt 0 ]]; then
+    log "${failed} state(s) incomplete"
+    return 1
+  fi
+  log "all states complete"
+}
+
 require_states() {
   if [[ $# -eq 0 ]]; then
     log "no states given; pass them as arguments or set TIGER_STATES"
@@ -151,11 +204,12 @@ case "$command" in
   nation) load_nation ;;
   states) require_states "${states[@]}"; load_states "${states[@]}" ;;
   index)  build_indexes ;;
+  verify) verify_states "${states[@]}" ;;
   all)    require_states "${states[@]}"
           load_nation
           load_states "${states[@]}"
           build_indexes ;;
-  *)      log "usage: tiger-load [nation|states|index|all] [STATE...]"; exit 64 ;;
+  *)      log "usage: tiger-load [nation|states|index|all|verify] [STATE...]"; exit 64 ;;
 esac
 
 log "done"
