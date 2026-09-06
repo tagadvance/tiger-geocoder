@@ -55,14 +55,48 @@ run() {
   bash "$script"
 }
 
+# The generated nation script creates its tables unconditionally, so re-running
+# it fails on "relation state_all already exists". That matters because loading
+# states incrementally is the normal workflow, and `all` has to stay re-runnable
+# for it. Set TIGER_RELOAD_NATION=1 to force it, e.g. for a new TIGER vintage.
 load_nation() {
+  if [[ ${TIGER_RELOAD_NATION:-0} != 1 ]] \
+    && [[ $(query --command "SELECT to_regclass('tiger_data.state_all') IS NOT NULL") == *t* ]]; then
+    log "nation data already loaded; skipping (TIGER_RELOAD_NATION=1 to force)"
+    return
+  fi
   run "$(generate nation "SELECT loader_generate_nation_script('${TIGER_PLATFORM}')")"
+}
+
+# The generated state script also creates its tables unconditionally. An
+# interrupted load therefore leaves partial tiger_data tables that block every
+# retry -- the likeliest way to lose a long load. Dropping this state's tables
+# first makes each state load a clean (re)load rather than a one-shot.
+drop_state_tables() {
+  local upper=$1
+  query --command "DO \$\$
+    DECLARE t record;
+    BEGIN
+      FOR t IN SELECT tablename FROM pg_tables
+        WHERE schemaname = 'tiger_data' AND tablename LIKE lower('${upper}') || '\\_%'
+      LOOP
+        EXECUTE format('DROP TABLE IF EXISTS tiger_data.%I CASCADE', t.tablename);
+      END LOOP;
+    END
+  \$\$;"
 }
 
 load_states() {
   local state upper
   for state in "$@"; do
     upper=${state^^}
+    if [[ ${TIGER_RELOAD_STATES:-0} != 1 ]] \
+      && [[ $(query --command "SELECT count(*) > 0 FROM api.load_log WHERE state = '${upper}'") == *t* ]]; then
+      log "${upper} already loaded; skipping (TIGER_RELOAD_STATES=1 to force)"
+      continue
+    fi
+    log "clearing any previous ${upper} tables"
+    drop_state_tables "$upper"
     run "$(generate "state_${state,,}" \
       "SELECT loader_generate_script(ARRAY['${upper}'], '${TIGER_PLATFORM}')")"
     query --command "INSERT INTO api.load_log (state, tiger_year)
