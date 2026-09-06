@@ -86,12 +86,24 @@ in the hundreds of gigabytes once indexed. Load only the states you need.
 loaded database is an ordinary directory you can move:
 
 ```sh
-make snapshot      # stops the database, tars ./data
-rsync -a data/ homelab:/srv/tiger-geocoder/data/
+make snapshot      # stops the database, tars ./data from inside a container
+sudo rsync -a --numeric-ids data/ homelab:/srv/tiger-geocoder/data/
 ```
+
+Two things are easy to get wrong here.
 
 The database must be stopped first. A tar of a live `PGDATA` is a torn copy, and
 it will restore cleanly right up until it doesn't.
+
+The cluster is owned by the container's `postgres` user and is mode 700, so your
+login account cannot read it — `make snapshot` borrows a container to do the tar
+and hands the tarball back. For the same reason, rsync needs `--numeric-ids`, so
+the cluster keeps its uid instead of being remapped to whoever happens to share
+that name on the far end. **Do not `chown` the data directory to your own user
+to work around this**: PostgreSQL refuses to start on a cluster it does not own,
+and a running server fails every new connection with `could not open file
+"global/pg_filenode.map": Permission denied`. If that happens,
+`docker compose restart db` repairs it.
 
 ## Versions
 

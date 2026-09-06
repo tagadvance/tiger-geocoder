@@ -3,6 +3,7 @@
 
 COMPOSE ?= docker compose
 EXEC    := $(COMPOSE) exec --user postgres db
+IMAGE   ?= tagadvance/tiger-geocoder:dev
 STATES  ?=
 
 .DEFAULT_GOAL := help
@@ -57,12 +58,24 @@ test: ## Run the test suite against the running database
 lint: ## Shellcheck every script
 	shellcheck docker/bin/* docker/initdb/*.sh test/*.bash
 
-# PGDATA is a bind mount, so a snapshot is just a tarball of a directory. The
-# database has to be stopped: a tar of a live PGDATA is a torn copy, and it will
-# restore cleanly right up until it doesn't.
+# PGDATA is a bind mount, so a snapshot is just a tarball of a directory -- but
+# the cluster belongs to the container's postgres user and is mode 700, so a
+# host-side tar cannot read it. Borrow a container, then hand the tarball back.
+#
+# The database has to be stopped: a tar of a live PGDATA is a torn copy, and it
+# will restore cleanly right up until it doesn't.
+#
+# To move a loaded database to another host, prefer rsync -- it is resumable and
+# incremental, which matters at this size:
+#     sudo rsync -a --numeric-ids data/ homelab:/srv/tiger-geocoder/data/
+# --numeric-ids is required: the cluster must stay owned by the container's uid,
+# not remapped to whatever shares that name on the far end.
 .PHONY: snapshot
 snapshot: down ## Tar the loaded database for transfer to another machine
-	tar --create --zstd --file tiger-geocoder-$$(date --utc +%Y%m%d).tar.zst data/
+	docker run --rm --volume "$$PWD":/work --workdir /work $(IMAGE) sh -c \
+		'out="tiger-geocoder-$$(date --utc +%Y%m%d).tar.zst"; \
+		 tar --create --zstd --file "$$out" data/ && \
+		 chown $(shell id -u):$(shell id -g) "$$out"'
 
 .PHONY: clean
 clean: down ## Remove containers; keeps ./data and ./gisdata
