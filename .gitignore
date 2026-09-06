@@ -1,0 +1,19 @@
+# ~/.gitignore is deny-by-default (a bare `*`) because it guards a $HOME-rooted
+# dotfiles repo, and it reaches this project through core.excludesFile. Undo it
+# here, then ignore what actually needs ignoring.
+!*
+
+# Bind-mounted state. PGDATA is the product and is far too large to track;
+# gisdata is the Census download cache.
+/data/
+/gisdata/
+
+# Local configuration and secrets.
+.env
+
+# Editor and IDE.
+.idea/
+
+# Leftover empty directory from the 2020 AWS Lambda build.
+/build/
+
