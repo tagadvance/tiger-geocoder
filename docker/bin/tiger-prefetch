@@ -23,8 +23,6 @@
 set -euo pipefail
 
 script=${1:?usage: tiger-prefetch <generated-script>}
-jobs=${TIGER_DOWNLOAD_JOBS:-4}
-wait_secs=${TIGER_DOWNLOAD_WAIT:-0.5}
 staging=${TIGER_STAGING:-/gisdata}
 
 # ftp:// as well as http(s)://. The Census FTP mirror is the default source,
@@ -36,6 +34,20 @@ mapfile -t urls < <(grep --only-matching --extended-regexp \
 
 if [[ ${#urls[@]} -eq 0 ]]; then
   exit 0
+fi
+
+# Pace according to where the files are coming from. The FTP mirror is not
+# behind the rate limiter, and it caps per-client bandwidth anyway -- 8 workers
+# measured no faster than 4 -- so there is nothing to gain by creeping and
+# nothing to fear by not. HTTPS is 20x faster per connection but blocks the
+# whole IP for up to an hour once tripped, and the limit is unpublished, so the
+# only sane default there is a gentle one. Explicit settings always win.
+if [[ ${urls[0]} == https://* ]]; then
+  jobs=${TIGER_DOWNLOAD_JOBS:-2}
+  wait_secs=${TIGER_DOWNLOAD_WAIT:-2}
+else
+  jobs=${TIGER_DOWNLOAD_JOBS:-4}
+  wait_secs=${TIGER_DOWNLOAD_WAIT:-0.5}
 fi
 
 work=$(mktemp --directory)

@@ -19,7 +19,12 @@ services:
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
       PGDATABASE: "${POSTGRES_DB:-geocoder}"
       TIGER_STATES: "${TIGER_STATES:-}"
-      TIGER_DOWNLOAD_JOBS: "${TIGER_DOWNLOAD_JOBS:-4}"
+      # Deliberately no default. tiger-prefetch picks one from the source:
+      # gentle for rate-limited HTTPS, less so for the FTP mirror. Baking a
+      # value in here would set the variable unconditionally and defeat that.
+      TIGER_DOWNLOAD_JOBS: "${TIGER_DOWNLOAD_JOBS:-}"
+      TIGER_DOWNLOAD_WAIT: "${TIGER_DOWNLOAD_WAIT:-}"
+      TIGER_WEBSITE_ROOT: "${TIGER_WEBSITE_ROOT:-}"
       # load  -- bulk ingest; trades crash safety for write throughput.
       # serve -- read-mostly geocoding; durable settings only.
       # Switch to serve once the data is in and you want a system of record.
