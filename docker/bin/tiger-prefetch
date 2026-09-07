@@ -20,6 +20,17 @@
 #   back in an hour, retrying inside the run cannot succeed and only deepens the
 #   block. Failing fast is also cheap to recover from: the cache is on disk, so
 #   re-running picks up where this left off and re-downloads nothing.
+#
+# Every other failure is soft. This script is an optimization, not the download:
+# the generated loader script does its own serial `wget --mirror` pass, which
+# skips whatever is already on disk and fetches whatever is not. So a file this
+# script could not get in parallel -- an FTP control connection dropped, a reset
+# mid-transfer -- costs a slow serial fetch, not a dead run. Propagating it
+# instead is how one transient error out of ~13,000 files used to abort an
+# eight-hour load at its first state, taking the rest of the batch and the index
+# build with it. A file that is genuinely gone rather than briefly unreachable
+# is caught downstream by api.state_is_complete, which is what keeps a partial
+# state out of api.load_log.
 set -euo pipefail
 
 script=${1:?usage: tiger-prefetch <generated-script>}
@@ -75,6 +86,16 @@ unify_cache
 work=$(mktemp --directory)
 trap 'rm --recursive --force "$work"' EXIT
 export TIGER_RATELIMIT_SENTINEL="$work/ratelimited"
+export TIGER_SOFTFAIL_SENTINEL="$work/softfailed"
+
+# Record a file this run could not fetch, and carry on. Appends are short and
+# O_APPEND, so concurrent workers do not interleave within a line.
+# shellcheck disable=SC2317
+soft_fail() {
+  printf 'prefetch: %s: %s -- leaving it to the loader'"'"'s serial pass\n' "$2" "$1" >&2
+  printf '%s\n' "$1" >>"$TIGER_SOFTFAIL_SENTINEL"
+}
+export -f soft_fail
 
 # Zip members carry CRC32s written by the Census, so testing the archive checks
 # the transfer against *their* checksums rather than merely against our own
@@ -118,11 +139,14 @@ fetch() {
     verify "$path" && return 0
   fi
 
+  # --retry-connrefused and a longer ladder than the default because the FTP
+  # mirror drops control connections under parallel load, and three tries over
+  # ~20s is not enough to ride out a server-side connection cap.
   if out=$(wget --no-verbose --server-response --mirror --reject=html \
-             --tries=3 --waitretry=10 --timeout=60 \
+             --tries=5 --waitretry=30 --retry-connrefused --timeout=60 \
              --wait="${TIGER_DOWNLOAD_WAIT}" --random-wait "$url" 2>&1); then
-    verify "$path"
-    return
+    verify "$path" || soft_fail "$url" "corrupt after download"
+    return 0
   fi
 
   if grep --quiet --extended-regexp 'HTTP/[0-9.]+ 429' <<<"$out"; then
@@ -132,8 +156,8 @@ fetch() {
     return 1
   fi
 
-  printf 'prefetch: failed %s\n' "$url" >&2
-  return 1
+  soft_fail "$url" "download failed"
+  return 0
 }
 export -f fetch
 
@@ -159,4 +183,15 @@ if [[ -s $TIGER_RATELIMIT_SENTINEL ]]; then
   exit 75   # EX_TEMPFAIL: retry later, do not treat as a broken load
 fi
 
-exit "$rc"
+if [[ -s $TIGER_SOFTFAIL_SENTINEL ]]; then
+  printf '\nprefetch: %d file(s) not fetched in parallel; the loader will fetch\n' \
+    "$(wc --lines <"$TIGER_SOFTFAIL_SENTINEL")" >&2
+  printf 'them serially. A file that is truly missing is caught by verification.\n' >&2
+elif [[ $rc -ne 0 ]]; then
+  printf 'prefetch: workers exited %d with no recorded failure\n' "$rc" >&2
+fi
+
+# Deliberately 0 unless rate limited: see the header. A prefetch problem must
+# not abort the load, because the serial pass can still succeed and completeness
+# is asserted against the data afterwards, not against this exit code.
+exit 0
