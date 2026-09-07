@@ -137,22 +137,29 @@ load_states() {
 build_indexes() {
   log "installing missing indexes"
   query --command 'SELECT install_missing_indexes();'
+  # FREEZE, not just ANALYZE. This dataset is written once and then read
+  # essentially forever, so freezing now converts a future anti-wraparound
+  # autovacuum -- which would eventually rewrite hundreds of gigabytes at a
+  # time nobody chose -- into work done here, where it is expected. It also
+  # marks pages all-visible, which is what lets the planner use index-only
+  # scans.
+  #
   # Fed on stdin, not with --command: psql sends a --command string as one
   # simple query, which puts it in an implicit transaction, and VACUUM cannot
   # run inside one. Statements read from stdin each run on their own.
-  log "vacuum analyze"
+  log "vacuum freeze analyze"
   psql --no-psqlrc --set ON_ERROR_STOP=1 <<-'SQL'
-	VACUUM (ANALYZE) tiger.addr;
-	VACUUM (ANALYZE) tiger.edges;
-	VACUUM (ANALYZE) tiger.faces;
-	VACUUM (ANALYZE) tiger.featnames;
-	VACUUM (ANALYZE) tiger.place;
-	VACUUM (ANALYZE) tiger.cousub;
-	VACUUM (ANALYZE) tiger.county;
-	VACUUM (ANALYZE) tiger.state;
-	VACUUM (ANALYZE) tiger.zip_lookup_base;
-	VACUUM (ANALYZE) tiger.zip_state;
-	VACUUM (ANALYZE) tiger.zip_state_loc;
+	VACUUM (FREEZE, ANALYZE) tiger.addr;
+	VACUUM (FREEZE, ANALYZE) tiger.edges;
+	VACUUM (FREEZE, ANALYZE) tiger.faces;
+	VACUUM (FREEZE, ANALYZE) tiger.featnames;
+	VACUUM (FREEZE, ANALYZE) tiger.place;
+	VACUUM (FREEZE, ANALYZE) tiger.cousub;
+	VACUUM (FREEZE, ANALYZE) tiger.county;
+	VACUUM (FREEZE, ANALYZE) tiger.state;
+	VACUUM (FREEZE, ANALYZE) tiger.zip_lookup_base;
+	VACUUM (FREEZE, ANALYZE) tiger.zip_state;
+	VACUUM (FREEZE, ANALYZE) tiger.zip_state_loc;
 	SQL
 }
 
