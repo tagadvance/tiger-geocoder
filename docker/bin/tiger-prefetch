@@ -50,6 +50,28 @@ else
   wait_secs=${TIGER_DOWNLOAD_WAIT:-0.5}
 fi
 
+# www2.census.gov and ftp2.census.gov serve byte-identical files at identical
+# paths, but wget --mirror keys its cache on the hostname. Without this,
+# switching protocols -- exactly what a rate-limit stop asks you to do -- would
+# re-download everything already on disk, and switching back would do it again.
+# Point every host name at one directory so the cache survives the switch.
+unify_cache() {
+  local canonical=$staging/census-cache host path
+  mkdir --parents "$canonical"
+  for host in www2.census.gov ftp2.census.gov ftp.census.gov; do
+    path=$staging/$host
+    [[ -L $path ]] && continue
+    if [[ -d $path ]]; then
+      # Hard links where possible: same filesystem, no second copy of 30GB.
+      cp --archive --link "$path/." "$canonical/" 2>/dev/null \
+        || cp --archive "$path/." "$canonical/"
+      rm --recursive --force "$path"
+    fi
+    ln --symbolic --no-target-directory "$canonical" "$path"
+  done
+}
+unify_cache
+
 work=$(mktemp --directory)
 trap 'rm --recursive --force "$work"' EXIT
 export TIGER_RATELIMIT_SENTINEL="$work/ratelimited"
