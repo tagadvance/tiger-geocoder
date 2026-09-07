@@ -5,10 +5,26 @@
 # load on a fast link. Rather than rewrite their logic, run the exact wget lines
 # they contain, in parallel, from the same working directory. wget --mirror then
 # finds the files already present and skips them on the real pass.
+#
+# www2.census.gov sits behind Cloudflare, which rate-limits. Tripping it returns
+# 429 for *every* request with a Retry-After measured in the thousands of
+# seconds -- an hour-long block observed in practice. Two consequences shape
+# this script:
+#
+#   Pace requests. TIGER_DOWNLOAD_WAIT puts a gap between retrievals in each
+#   worker, so the request rate is roughly jobs/wait per second rather than as
+#   fast as the link allows. A national load is ~13,000 files; sustained flat
+#   out, it will trip the limit.
+#
+#   Stop immediately on 429, rather than retrying. When the server says come
+#   back in an hour, retrying inside the run cannot succeed and only deepens the
+#   block. Failing fast is also cheap to recover from: the cache is on disk, so
+#   re-running picks up where this left off and re-downloads nothing.
 set -euo pipefail
 
 script=${1:?usage: tiger-prefetch <generated-script>}
 jobs=${TIGER_DOWNLOAD_JOBS:-4}
+wait_secs=${TIGER_DOWNLOAD_WAIT:-0.5}
 staging=${TIGER_STAGING:-/gisdata}
 
 mapfile -t urls < <(grep --only-matching --extended-regexp \
@@ -18,8 +34,69 @@ if [[ ${#urls[@]} -eq 0 ]]; then
   exit 0
 fi
 
-printf 'prefetching %d files with %d workers\n' "${#urls[@]}" "$jobs" >&2
+work=$(mktemp --directory)
+trap 'rm --recursive --force "$work"' EXIT
+export TIGER_RATELIMIT_SENTINEL="$work/ratelimited"
+
+# Invoked by xargs through `bash -c`, not from this scope, which shellcheck
+# cannot see.
+# shellcheck disable=SC2317
+fetch() {
+  local url=$1 out
+  # Another worker already hit the limit; nothing this one does can help.
+  [[ -e $TIGER_RATELIMIT_SENTINEL ]] && return 0
+
+  # Skip files already in the cache without asking the server. wget --mirror
+  # would otherwise revalidate each one, and a revalidation is still a request:
+  # resuming a national load would spend ~13,000 of them to download nothing,
+  # which is how a resume trips the rate limit that stopped the first attempt.
+  #
+  # This gives up wget's size check on the cached copy. That is acceptable
+  # because a truncated zip fails loudly: the generated script runs unzip under
+  # `set -e`, so a bad file aborts the load rather than loading partial data.
+  # Set TIGER_DOWNLOAD_REVALIDATE=true to check every file against the server.
+  if [[ ${TIGER_DOWNLOAD_REVALIDATE:-false} != true && -s ${url#*://} ]]; then
+    return 0
+  fi
+
+  if out=$(wget --no-verbose --server-response --mirror --reject=html \
+             --tries=3 --waitretry=10 --timeout=60 \
+             --wait="${TIGER_DOWNLOAD_WAIT}" --random-wait "$url" 2>&1); then
+    return 0
+  fi
+
+  if grep --quiet --extended-regexp 'HTTP/[0-9.]+ 429' <<<"$out"; then
+    grep --ignore-case --only-matching --extended-regexp \
+      'Retry-After: *[0-9]+' <<<"$out" | grep --only-matching '[0-9]*$' \
+      | tail -1 > "$TIGER_RATELIMIT_SENTINEL" || true
+    return 1
+  fi
+
+  printf 'prefetch: failed %s\n' "$url" >&2
+  return 1
+}
+export -f fetch
+
+printf 'prefetching %d files with %d workers (%ss between requests)\n' \
+  "${#urls[@]}" "$jobs" "$wait_secs" >&2
 cd "$staging"
+
+rc=0
 printf '%s\n' "${urls[@]}" \
-  | xargs --no-run-if-empty --max-procs="$jobs" --max-args=1 \
-      wget --quiet --mirror --reject=html
+  | TIGER_DOWNLOAD_WAIT="$wait_secs" \
+      TIGER_DOWNLOAD_REVALIDATE="${TIGER_DOWNLOAD_REVALIDATE:-false}" \
+      xargs --no-run-if-empty \
+      --max-procs="$jobs" --max-args=1 \
+      bash -c 'fetch "$@"' _ || rc=$?
+
+if [[ -s $TIGER_RATELIMIT_SENTINEL ]]; then
+  retry=$(<"$TIGER_RATELIMIT_SENTINEL")
+  printf '\nprefetch: rate limited by the Census server (HTTP 429).\n' >&2
+  printf 'Retry-After: %s seconds (~%s minutes).\n' "$retry" "$((retry / 60))" >&2
+  printf 'Nothing already downloaded is lost -- re-run after the wait and the\n' >&2
+  printf 'cache resumes where this stopped. Lower TIGER_DOWNLOAD_JOBS or raise\n' >&2
+  printf 'TIGER_DOWNLOAD_WAIT to avoid tripping it again.\n' >&2
+  exit 75   # EX_TEMPFAIL: retry later, do not treat as a broken load
+fi
+
+exit "$rc"

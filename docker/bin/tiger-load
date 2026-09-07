@@ -50,8 +50,19 @@ generate() {
 }
 
 run() {
-  local script=$1
-  tiger-prefetch "$script"
+  local script=$1 rc=0
+  tiger-prefetch "$script" || rc=$?
+
+  # 75 is EX_TEMPFAIL: the Census server rate-limited the prefetch. Stop before
+  # running the script, because it would fetch the remaining files serially and
+  # hit the same wall -- but propagate the code so the caller can tell "come
+  # back later" apart from a real failure. The cache makes a re-run cheap.
+  if [[ $rc -eq 75 ]]; then
+    log "prefetch rate limited; not starting the load"
+    return 75
+  fi
+  [[ $rc -eq 0 ]] || return "$rc"
+
   log "running $(basename "$script")"
   bash "$script"
 }
