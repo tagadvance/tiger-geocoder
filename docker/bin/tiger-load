@@ -235,7 +235,14 @@ require_states() {
 command=${1:-all}
 shift || true
 states=("$@")
-if [[ ${#states[@]} -eq 0 && -n ${TIGER_STATES:-} ]]; then
+
+# TIGER_STATES names what to *load*, so it must not reach `verify`. Bare
+# `verify` means "check everything the load log claims to hold", which is the
+# check you run before trusting a large load -- and letting a stale TIGER_STATES
+# stand in for that is the worst possible failure. It would report on one state,
+# say nothing about the hundreds of gigabytes actually loaded, and look like it
+# passed.
+if [[ ${#states[@]} -eq 0 && -n ${TIGER_STATES:-} && $command != verify ]]; then
   read -ra states <<<"${TIGER_STATES//,/ }"
 fi
 
