@@ -175,7 +175,8 @@ verify_loaded() {
 }
 
 load_states() {
-  local state upper
+  local state upper rc
+  local failed_states=()
   for state in "$@"; do
     upper=${state^^}
     if [[ ${TIGER_RELOAD_STATES:-0} != 1 ]] \
@@ -185,11 +186,19 @@ load_states() {
     fi
     log "clearing any previous ${upper} tables"
     drop_state_tables "$upper"
+    rc=0
     run "$(generate "state_${state,,}" \
-      "SELECT loader_generate_script(ARRAY['${upper}'], '${TIGER_PLATFORM}')")"
-    if ! verify_loaded "$upper"; then
+      "SELECT loader_generate_script(ARRAY['${upper}'], '${TIGER_PLATFORM}')")" || rc=$?
+
+    # 75 is not this state's failure: the Census is refusing every request, so
+    # no state after it would fare any better. Stop the whole run, as before.
+    if [[ $rc -eq 75 ]]; then
+      exit 75
+    fi
+    if [[ $rc -ne 0 ]] || ! verify_loaded "$upper"; then
       log "re-run to retry ${upper}: its tables are dropped and reloaded on retry"
-      exit 65
+      failed_states+=("$upper")
+      continue
     fi
     query --command "INSERT INTO api.load_log (state, tiger_year)
       SELECT '${upper}', tiger_year FROM tiger.loader_variables
@@ -197,6 +206,13 @@ load_states() {
         SET tiger_year = EXCLUDED.tiger_year, loaded_at = now();"
     log "loaded ${upper}"
   done
+
+  # States are independent loads, so one that failed costs itself and nothing
+  # else -- but the run as a whole did not succeed and must not say it did.
+  if [[ ${#failed_states[@]} -gt 0 ]]; then
+    log "${#failed_states[@]} state(s) failed: ${failed_states[*]}"
+    return 65
+  fi
 }
 
 # Without this the geocoder technically works and is unusably slow: the loader
@@ -281,6 +297,8 @@ fi
 
 preflight
 
+status=0
+
 case "$command" in
   nation) load_nation ;;
   states) require_states "${states[@]}"; load_states "${states[@]}" ;;
@@ -288,9 +306,15 @@ case "$command" in
   verify) verify_states "${states[@]}" ;;
   all)    require_states "${states[@]}"
           load_nation
-          load_states "${states[@]}"
+          # A state that failed verification is no reason to leave the states
+          # that did load without indexes, so build them before reporting it.
+          load_states "${states[@]}" || status=$?
           build_indexes ;;
   *)      log "usage: tiger-load [nation|states|index|all|verify] [STATE...]"; exit 64 ;;
 esac
+
+if [[ $status -ne 0 ]]; then
+  exit "$status"
+fi
 
 log "done"
