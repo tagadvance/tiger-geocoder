@@ -59,13 +59,46 @@ set_website_root() {
   log "source ${root}"
 }
 
+# nullglob above is only half the fix: the wget that was meant to fetch a file
+# the Census does not have exits 8 first and aborts the script under -e, long
+# before the loop nullglob protects is reached. Wrap wget so the two codes that
+# mean "the file did not arrive" -- 4, network failure, and 8, server issued an
+# error response -- are a notice rather than the end of a 22-hour load.
+# Everything else stays fatal, 3 (file I/O error) above all: that is how a full
+# disk shows up, and swallowing it would leave a half-loaded state looking
+# finished. api.state_is_complete is the backstop for a file that really should
+# have been there.
 generate() {
   local name=$1 sql=$2
   local script="${TIGER_STAGING}/${name}.sh"
   set_website_root
   log "generating ${name}"
   {
-    printf '#!/usr/bin/env bash\nset -euo pipefail\nshopt -s nullglob\n'
+    cat <<-'HEADER'
+	#!/usr/bin/env bash
+	set -euo pipefail
+	shopt -s nullglob
+
+	# The Census does not publish every layer for every county, and a transient
+	# server error is not worth losing the run over. Completeness is asserted
+	# against the loaded data afterwards, not against these exit codes.
+	wget() {
+	  local rc=0 arg url="$*"
+	  command wget "$@" || rc=$?
+	  case $rc in
+	    0) return 0 ;;
+	    4 | 8) ;;
+	    *) return "$rc" ;;
+	  esac
+	  for arg in "$@"; do
+	    if [[ $arg == *://* ]]; then
+	      url=$arg
+	      break
+	    fi
+	  done
+	  printf 'wget: exit %d, skipping %s\n' "$rc" "$url" >&2
+	}
+	HEADER
     query --command "$sql"
   } >"$script"
   chmod +x "$script"
