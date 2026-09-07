@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# Emit PostgreSQL settings sized for the machine this container is actually
+# running on, one `name=value` per line.
+#
+# The point is portability: the same compose file should be reasonable on a
+# laptop and on a 16-core server without anyone editing pinned megabyte counts.
+# Hard-coded tuning is either too small for the big host or refuses to start on
+# the small one.
+#
+# Two profiles, because the load and the steady state want opposite things:
+#
+#   load  (default)  bulk ingest. Trades crash safety for write throughput --
+#                    on a crash you re-run the load, which is re-runnable by
+#                    design. Not appropriate for a system of record.
+#   serve            read-mostly geocoding. Durable settings only.
+#
+# The steady-state block is emitted for both profiles: shared_buffers and
+# friends are not a load-time trick, they are correct all the time.
+#
+# Every value can be overridden -- see TIGER_TUNE_* below -- and anything passed
+# on the postgres command line wins outright, because the entrypoint puts these
+# first and PostgreSQL lets the last `-c` for a setting take effect.
+set -euo pipefail
+
+# Memory available to *this container*, in MiB. A cgroup limit beats the host's
+# total: /proc/meminfo is not namespaced, so a limited container reads the
+# machine's full RAM and would otherwise size shared_buffers past its own cap
+# and get OOM-killed under load.
+detect_mem_mib() {
+  local total limit
+  total=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) / 1024 ))
+
+  if [[ -r /sys/fs/cgroup/memory.max ]]; then                    # cgroup v2
+    limit=$(< /sys/fs/cgroup/memory.max)
+  elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then # cgroup v1
+    limit=$(< /sys/fs/cgroup/memory/memory.limit_in_bytes)
+  else
+    limit=max
+  fi
+
+  # v2 says "max" when unlimited; v1 says a number near 2^63. Both mean "no cap".
+  if [[ $limit != max ]] && (( limit > 0 && limit / 1048576 < total )); then
+    total=$(( limit / 1048576 ))
+  fi
+  echo "$total"
+}
+
+# Physical cores, ignoring SMT. Hyperthread siblings share execution units, so
+# counting them inflates the worker pools well past what the box can actually
+# run in parallel -- and PostgreSQL backends are not the workload that benefits
+# from SMT. Clamped by nproc (which already honours cpuset and affinity) and by
+# any CPU quota.
+detect_cores() {
+  local cores threads quota period
+
+  # Unique (socket, core) pairs. Absent on some architectures, hence the fallback.
+  cores=$(awk -F': ' '
+    /^physical id/ { p = $2 }
+    /^core id/     { print p ":" $2 }
+  ' /proc/cpuinfo | sort --unique | wc --lines)
+
+  threads=$(nproc)
+  (( cores > 0 )) || cores=$threads
+  (( cores <= threads )) || cores=$threads
+
+  if [[ -r /sys/fs/cgroup/cpu.max ]]; then                       # cgroup v2
+    read -r quota period < /sys/fs/cgroup/cpu.max
+  elif [[ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]]; then        # cgroup v1
+    quota=$(< /sys/fs/cgroup/cpu/cpu.cfs_quota_us)
+    period=$(< /sys/fs/cgroup/cpu/cpu.cfs_period_us)
+  else
+    quota=max
+  fi
+
+  if [[ $quota != max ]] && (( quota > 0 )); then
+    local allowed=$(( (quota + period - 1) / period ))           # round up
+    (( allowed > 0 && allowed < cores )) && cores=$allowed
+  fi
+
+  echo "$cores"
+}
+
+clamp() { # value floor ceiling
+  local v=$1 lo=$2 hi=$3
+  (( v < lo )) && v=$lo
+  (( v > hi )) && v=$hi
+  echo "$v"
+}
+
+mem=${TIGER_TUNE_MEM_MIB:-$(detect_mem_mib)}
+cores=${TIGER_TUNE_CORES:-$(detect_cores)}
+profile=${TIGER_TUNE_PROFILE:-load}
+
+case $profile in
+  load|serve) ;;
+  *) printf 'tiger-tune: unknown TIGER_TUNE_PROFILE %q (want load|serve)\n' \
+       "$profile" >&2; exit 64 ;;
+esac
+
+# --- steady state -----------------------------------------------------------
+# A quarter of memory to shared_buffers is the long-standing default split; the
+# rest of RAM still works for the database as kernel page cache, which is what
+# effective_cache_size describes to the planner. effective_cache_size allocates
+# nothing -- it only changes index-vs-seqscan costing, and getting it wrong is
+# how geocode() ends up sequentially scanning a national featnames table.
+shared_buffers=$(clamp $(( mem / 4 )) 128 $(( 64 * 1024 )) )
+effective_cache_size=$(( mem * 3 / 4 ))
+
+# Per sort/hash node, per worker -- so the ceiling matters more than the ratio.
+work_mem=$(clamp $(( mem / 1024 )) 4 256)
+
+# Index builds during `tiger-load index`, which is where a national load spends
+# its tail. autovacuum_work_mem must be set explicitly: it defaults to -1,
+# meaning "inherit maintenance_work_mem", and each autovacuum worker claims that
+# independently -- so raising maintenance_work_mem silently authorises several
+# times that much in the background.
+maintenance_work_mem=$(clamp $(( mem / 16 )) 64 $(( 8 * 1024 )) )
+autovacuum_work_mem=$(clamp $(( maintenance_work_mem / 4 )) 64 $(( 2 * 1024 )) )
+
+# This dataset is written once and then read essentially forever, so both of the
+# following are priced for reads. Raising the IO concurrency pays off in the
+# bitmap heap scans geocode() leans on -- the default of 16 is tuned for a
+# single spindle. A statistics target of 200 costs a slower ANALYZE exactly once,
+# at the end of the load, and buys better plans against a table that never
+# changes again; the usual argument against raising it is churn, and there is
+# none here.
+
+# Pools get the full core count; a single query or index build gets half, so one
+# operation cannot monopolise the machine.
+per_query=$(clamp $(( cores / 2 )) 2 "$cores")
+
+cat <<SETTINGS
+shared_buffers=${shared_buffers}MB
+effective_cache_size=${effective_cache_size}MB
+work_mem=${work_mem}MB
+maintenance_work_mem=${maintenance_work_mem}MB
+autovacuum_work_mem=${autovacuum_work_mem}MB
+max_worker_processes=${cores}
+max_parallel_workers=${cores}
+max_parallel_workers_per_gather=${per_query}
+max_parallel_maintenance_workers=${per_query}
+random_page_cost=${TIGER_TUNE_RANDOM_PAGE_COST:-1.1}
+effective_io_concurrency=${TIGER_TUNE_IO_CONCURRENCY:-64}
+maintenance_io_concurrency=${TIGER_TUNE_IO_CONCURRENCY:-64}
+default_statistics_target=200
+SETTINGS
+
+[[ $profile == load ]] || exit 0
+
+# --- load only --------------------------------------------------------------
+# Sized so a bulk load checkpoints on volume rather than on the clock. Too small
+# and the load stalls in continuous checkpoints; the cost is disk and a longer
+# crash recovery, and the load is re-runnable anyway.
+max_wal_size=$(clamp $(( mem / 8 )) 1024 $(( 32 * 1024 )) )
+
+cat <<SETTINGS
+synchronous_commit=off
+wal_compression=${TIGER_TUNE_WAL_COMPRESSION:-zstd}
+max_wal_size=${max_wal_size}MB
+min_wal_size=$(( max_wal_size / 4 ))MB
+checkpoint_timeout=30min
+checkpoint_completion_target=0.9
+autovacuum_vacuum_cost_delay=0
+SETTINGS

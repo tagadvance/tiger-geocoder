@@ -69,6 +69,24 @@ expect_true "the completeness verifier is present" \
   "SELECT count(*) = 2 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'api' AND p.proname IN ('verify_state', 'state_is_complete')"
 
+# Tuning is computed at startup, so the values are host-dependent and cannot be
+# asserted exactly. What is assertable is that it ran at all: 128MB is the stock
+# default, and finding it means tiger-tune was skipped or silently failed.
+expect_true "the server was tuned for this host" \
+  "SELECT setting::bigint * 8192 > 128 * 1024 * 1024 FROM pg_settings
+   WHERE name = 'shared_buffers'"
+
+# autovacuum_work_mem defaults to -1, meaning "inherit maintenance_work_mem" --
+# per worker. Raising maintenance_work_mem without capping this authorises
+# several times that much memory in the background, which is how a tuned server
+# gets OOM-killed mid-load rather than at startup where you would notice.
+# pg_settings.setting, not current_setting(): the latter renders a unit suffix
+# ("1003MB") that will not cast, while both of these are plain kB here.
+expect_true "autovacuum memory is capped independently of maintenance_work_mem" \
+  "SELECT av.setting::bigint > 0 AND av.setting::bigint <= mw.setting::bigint
+   FROM pg_settings av, pg_settings mw
+   WHERE av.name = 'autovacuum_work_mem' AND mw.name = 'maintenance_work_mem'"
+
 echo "-- data"
 
 # to_regclass rather than a count: tiger_data does not exist until the first

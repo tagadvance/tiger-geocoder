@@ -9,7 +9,10 @@ services:
         POSTGIS_MAJOR: "${POSTGIS_MAJOR:-3.6}"
         TIGER_GEOCODER_VERSION: "${TIGER_GEOCODER_VERSION:-2025.2}"
     image: tagadvance/tiger-geocoder:${TAG:-dev}
-    shm_size: 1gb
+    # Parallel workers allocate dynamic shared memory from /dev/shm, and
+    # tiger-tune scales the worker pools with the core count, so this has to
+    # have room to grow. Docker's 64m default is nowhere near enough.
+    shm_size: 4gb
     environment:
       POSTGRES_DB: "${POSTGRES_DB:-geocoder}"
       POSTGRES_USER: "${POSTGRES_USER:-postgres}"
@@ -17,6 +20,11 @@ services:
       PGDATABASE: "${POSTGRES_DB:-geocoder}"
       TIGER_STATES: "${TIGER_STATES:-}"
       TIGER_DOWNLOAD_JOBS: "${TIGER_DOWNLOAD_JOBS:-4}"
+      # load  -- bulk ingest; trades crash safety for write throughput.
+      # serve -- read-mostly geocoding; durable settings only.
+      # Switch to serve once the data is in and you want a system of record.
+      TIGER_TUNE_PROFILE: "${TIGER_TUNE_PROFILE:-load}"
+      TIGER_TUNE: "${TIGER_TUNE:-true}"
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -29,21 +37,18 @@ services:
       # mount boundary. Mounting the old path is a hard error on these images.
       - ./data:/var/lib/postgresql
       - ./gisdata:/gisdata
-    # The bulk load is overwhelmingly sequential writes of data that can simply
-    # be downloaded again. Trading crash safety for load speed is the right call
-    # here; take these off before treating the result as a system of record.
-    command:
-      - postgres
-      - -c
-      - synchronous_commit=off
-      - -c
-      - maintenance_work_mem=1GB
-      - -c
-      - max_wal_size=8GB
-      - -c
-      - checkpoint_timeout=30min
-      - -c
-      - autovacuum_vacuum_cost_delay=0
+    # No `command:` here on purpose. Settings are computed at startup by
+    # tiger-tune, from the memory and cores this container can actually see, so
+    # the same file is reasonable on a laptop and on a 16-core server. Pinned
+    # megabyte counts are either too small for the big host or fail to start on
+    # the small one.
+    #
+    # To override one setting, add it back as a command; the entrypoint puts the
+    # computed flags first and PostgreSQL honours the last `-c` for a setting:
+    #
+    #     command: [postgres, -c, shared_buffers=24GB]
+    #
+    # `docker compose logs db | grep tiger-tune` shows what was applied.
     # Checking pg_isready alone is not enough. If an initdb hook fails, the
     # entrypoint aborts, restart policy brings the container back, the now
     # non-empty data directory makes it skip initialization -- and a database

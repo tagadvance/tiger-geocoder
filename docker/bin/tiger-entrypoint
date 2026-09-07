@@ -14,4 +14,21 @@ if [[ $(id --user) -eq 0 ]]; then
   chown postgres:postgres "${TIGER_STAGING}" "${TIGER_STAGING}/temp"
 fi
 
+# Size the server for the machine we landed on. These go in ahead of whatever
+# compose passed, so an explicit `-c` on the command line still wins: PostgreSQL
+# applies the last occurrence of a setting. Set TIGER_TUNE=false to opt out
+# entirely and run on stock defaults.
+if [[ ${1:-} == postgres && ${TIGER_TUNE:-true} == true ]]; then
+  shift
+  tuned=()
+  while IFS= read -r setting; do
+    tuned+=(-c "$setting")
+  done < <(tiger-tune)
+
+  printf 'tiger-tune: %s profile, %s\n' \
+    "${TIGER_TUNE_PROFILE:-load}" "${tuned[*]}" >&2
+
+  set -- postgres "${tuned[@]}" "$@"
+fi
+
 exec docker-entrypoint.sh "$@"
