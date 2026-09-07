@@ -17,6 +17,10 @@
 # Editor and IDE.
 .idea/
 
+# Scratch: handover notes, draft bug reports, working files. Never committed.
+# Needs to be explicit because the `!*` above un-ignores everything.
+/tmp/
+
 # Leftover empty directory from the 2020 AWS Lambda build.
 /build/
 
