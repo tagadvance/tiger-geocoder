@@ -13,11 +13,11 @@
 # seconds -- an hour-long block observed in practice. Two consequences shape
 # this script:
 #
-#   Pace requests. One request at a time, with TIGER_DOWNLOAD_WAIT between
-#   them. Parallelism was measured to buy nothing here -- the FTP mirror caps
-#   per-client bandwidth, so 8 workers ran no faster than 4 -- while over HTTPS
-#   it is exactly what trips the limiter. A national load is ~13,000 files;
-#   sustained flat out, it will trip it.
+#   Pace requests. One at a time, one second apart. Parallelism was measured
+#   to buy nothing here -- the FTP mirror caps per-client bandwidth, so 8
+#   workers ran no faster than 4 -- while over HTTPS it is exactly what trips
+#   the limiter. A national load is ~13,000 files; sustained flat out, it will
+#   trip it.
 #
 #   Stop immediately on 429, rather than retrying. When the server says come
 #   back in an hour, retrying inside the run cannot succeed and only deepens the
@@ -50,15 +50,11 @@ if [[ ${#urls[@]} -eq 0 ]]; then
   exit 0
 fi
 
-# Pace according to where the files are coming from. The FTP mirror is not
-# behind the rate limiter, so a short gap is enough. HTTPS blocks the whole IP
-# for up to an hour once tripped and the limit is unpublished, so the only sane
-# default there is a gentle one. An explicit setting always wins.
-if [[ ${urls[0]} == https://* ]]; then
-  wait_secs=${TIGER_DOWNLOAD_WAIT:-2}
-else
-  wait_secs=${TIGER_DOWNLOAD_WAIT:-0.5}
-fi
+# One request at a time, one second apart, from either mirror. This is a
+# one-time import, so there is nothing to gain by tuning it and a rate-limit
+# block to lose by getting it wrong. If HTTPS trips the limiter anyway, the
+# answer is the FTP mirror, not a smaller number here.
+wait_secs=1
 
 # www2.census.gov and ftp2.census.gov serve byte-identical files at identical
 # paths, but wget --mirror keys its cache on the hostname. Without this,
@@ -133,7 +129,7 @@ fetch() {
   # ride out a server-side connection cap.
   if out=$(wget --no-verbose --server-response --mirror --reject=html \
              --tries=5 --waitretry=30 --retry-connrefused --timeout=60 \
-             --wait="${TIGER_DOWNLOAD_WAIT}" --random-wait "$url" 2>&1); then
+             --wait="$wait_secs" --random-wait "$url" 2>&1); then
     verify "$path" || soft_fail "$url" "corrupt after download"
     return 0
   fi
@@ -152,7 +148,6 @@ printf 'prefetching %d files (%ss between requests)\n' \
   "${#urls[@]}" "$wait_secs" >&2
 cd "$staging"
 
-TIGER_DOWNLOAD_WAIT=$wait_secs
 TIGER_DOWNLOAD_REVALIDATE=${TIGER_DOWNLOAD_REVALIDATE:-false}
 for url in "${urls[@]}"; do
   # The only failure fetch reports is a rate limit, and nothing later in the
@@ -165,8 +160,7 @@ if [[ -n $ratelimit_retry ]]; then
   printf '\nprefetch: rate limited by the Census server (HTTP 429).\n' >&2
   printf 'Retry-After: %s seconds (~%s minutes).\n' "$retry" "$((retry / 60))" >&2
   printf 'Nothing already downloaded is lost -- re-run after the wait and the\n' >&2
-  printf 'cache resumes where this stopped. Raise TIGER_DOWNLOAD_WAIT to avoid\n' >&2
-  printf 'tripping it again, or switch to the FTP mirror.\n' >&2
+  printf 'cache resumes where this stopped. Use the FTP mirror to avoid it.\n' >&2
   exit 75   # EX_TEMPFAIL: retry later, do not treat as a broken load
 fi
 

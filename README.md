@@ -75,8 +75,7 @@ upstream loader fails quietly:
   indistinguishable from a finished one, and nothing backs off when the Census
   rate-limits. `tiger-prefetch` runs the same wget lines first — one at a time,
   with a pause between them — tests each archive against the Census's own CRCs
-  before marking it complete, and stops cleanly on a 429. Pace it with
-  `TIGER_DOWNLOAD_WAIT`.
+  before marking it complete, and stops cleanly on a 429.
 - **A load exiting 0 does not mean it loaded everything.** `nullglob` stops a
   missing file from aborting the run, which necessarily turns it into a silent
   skip; and county-level layers (`faces`, `featnames`, `edges`, `addr`) are
@@ -218,12 +217,11 @@ also how to see what another machine would get:
 docker compose exec --user postgres -e TIGER_TUNE_CORES=4 db tiger-tune
 ```
 
-Note that `TIGER_DOWNLOAD_WAIT` is not part of this. It paces the Census
-download pre-warm, which is bound by the network rather than the machine.
-Downloads run one at a time and there is deliberately no knob to make them
-concurrent: the FTP mirror caps per-client bandwidth, so extra workers measured
-no faster than one, and over https concurrency is precisely what trips
-Cloudflare's limiter.
+Downloads are not part of this, and have no settings at all: one request at a
+time, one second apart, from either mirror. The FTP mirror caps per-client
+bandwidth, so extra workers measured no faster than one; over https, concurrency
+and haste are precisely what trip Cloudflare's limiter. The only download choice
+is which mirror, via `WEBSITE_ROOT`.
 
 ## Moving a loaded database
 
