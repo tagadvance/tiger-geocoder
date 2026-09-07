@@ -38,9 +38,15 @@ logs: ## Follow the database log
 nation: ## Load the national county/state layers (required, do this first)
 	$(EXEC) tiger-load nation
 
+# TIGER_WEBSITE_ROOT is passed with an explicit -e rather than relying on the
+# service environment: compose interpolates that at container-create time, so a
+# variable set on this command line is not reliably visible to an exec into an
+# already-running container.
 .PHONY: load
-load: ## Load states, e.g. make load STATES="OH KY"
-	$(EXEC) tiger-load all $(STATES)
+load: ## Load states, e.g. make load STATES="OH KY" [WEBSITE_ROOT=https://...]
+	$(COMPOSE) exec --user postgres \
+		$(if $(WEBSITE_ROOT),--env TIGER_WEBSITE_ROOT=$(WEBSITE_ROOT)) \
+		db tiger-load all $(STATES)
 
 .PHONY: index
 index: ## Install missing indexes and vacuum analyze
