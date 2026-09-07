@@ -37,9 +37,32 @@ query() { psql --no-align --tuples-only --no-psqlrc --set ON_ERROR_STOP=1 "$@"; 
 # `for z in *.zip`, so when a state has no file for a layer -- routine, not an
 # error -- the glob stays literal and unzip fails, taking the whole load with
 # it under -e. nullglob makes the loop body correctly not run at all.
+# www2.census.gov is behind Cloudflare and rate-limits hard: one state's worth
+# of parallel fetches earns a 429 on *every* request with an hour-long
+# Retry-After. ftp2.census.gov serves the identical files from Census-owned
+# address space, outside that limiter.
+#
+# It is much slower per connection -- ~1 MB/s aggregate against 22 MB/s over
+# HTTPS -- and does not go faster with more workers, so the whole national
+# download is roughly 8.5 hours either way you slice it. That is the trade:
+# predictable and unattended-safe over fast but liable to stop dead for an hour.
+# Set TIGER_WEBSITE_ROOT to an https:// root to go back, which is reasonable for
+# a single small state.
+set_website_root() {
+  local root=${TIGER_WEBSITE_ROOT:-}
+  if [[ -z $root ]]; then
+    root="ftp://ftp2.census.gov/geo/tiger/TIGER$(query --command \
+      'SELECT tiger_year FROM tiger.loader_variables' | tr --delete '[:space:]')"
+  fi
+  query --command "UPDATE tiger.loader_variables SET website_root = '${root}'
+    WHERE website_root IS DISTINCT FROM '${root}'" >/dev/null
+  log "source ${root}"
+}
+
 generate() {
   local name=$1 sql=$2
   local script="${TIGER_STAGING}/${name}.sh"
+  set_website_root
   log "generating ${name}"
   {
     printf '#!/usr/bin/env bash\nset -euo pipefail\nshopt -s nullglob\n'

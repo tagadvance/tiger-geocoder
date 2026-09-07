@@ -27,8 +27,12 @@ jobs=${TIGER_DOWNLOAD_JOBS:-4}
 wait_secs=${TIGER_DOWNLOAD_WAIT:-0.5}
 staging=${TIGER_STAGING:-/gisdata}
 
+# ftp:// as well as http(s)://. The Census FTP mirror is the default source,
+# and a pattern that missed it would silently make this whole script a no-op:
+# zero URLs is not an error, so the generated script would quietly fall back to
+# fetching everything serially, unverified, with no rate-limit handling.
 mapfile -t urls < <(grep --only-matching --extended-regexp \
-  'https?://[^[:space:]]+\.zip' "$script" | sort --unique)
+  '(https?|ftp)://[^[:space:]]+\.zip' "$script" | sort --unique)
 
 if [[ ${#urls[@]} -eq 0 ]]; then
   exit 0
@@ -38,31 +42,53 @@ work=$(mktemp --directory)
 trap 'rm --recursive --force "$work"' EXIT
 export TIGER_RATELIMIT_SENTINEL="$work/ratelimited"
 
+# Zip members carry CRC32s written by the Census, so testing the archive checks
+# the transfer against *their* checksums rather than merely against our own
+# copy. That catches truncation and corruption; hashing whatever arrived cannot,
+# because it would faithfully hash a half-file.
+#
+# The .sha256 sidecar is written only after that check passes, so its presence
+# -- not the zip's -- is what marks a download complete. This matters because
+# wget writes straight to the final filename with no staging: an interrupted
+# transfer leaves a truncated file that is indistinguishable, by name and
+# timestamp, from a finished one.
+# shellcheck disable=SC2317
+verify() {
+  local path=$1
+  if ! unzip -qq -t "$path" >/dev/null 2>&1; then
+    printf 'prefetch: corrupt or truncated, discarding %s\n' "$path" >&2
+    rm --force "$path" "$path.sha256"
+    return 1
+  fi
+  sha256sum "$path" | cut --delimiter=' ' --fields=1 >"$path.sha256"
+}
+export -f verify
+
 # Invoked by xargs through `bash -c`, not from this scope, which shellcheck
 # cannot see.
 # shellcheck disable=SC2317
 fetch() {
   local url=$1 out
+  local path=${url#*://}
   # Another worker already hit the limit; nothing this one does can help.
   [[ -e $TIGER_RATELIMIT_SENTINEL ]] && return 0
 
-  # Skip files already in the cache without asking the server. wget --mirror
-  # would otherwise revalidate each one, and a revalidation is still a request:
-  # resuming a national load would spend ~13,000 of them to download nothing,
-  # which is how a resume trips the rate limit that stopped the first attempt.
-  #
-  # This gives up wget's size check on the cached copy. That is acceptable
-  # because a truncated zip fails loudly: the generated script runs unzip under
-  # `set -e`, so a bad file aborts the load rather than loading partial data.
-  # Set TIGER_DOWNLOAD_REVALIDATE=true to check every file against the server.
-  if [[ ${TIGER_DOWNLOAD_REVALIDATE:-false} != true && -s ${url#*://} ]]; then
-    return 0
+  if [[ ${TIGER_DOWNLOAD_REVALIDATE:-false} != true && -s $path ]]; then
+    # Verified already: skip without contacting the server. wget --mirror would
+    # otherwise revalidate, and a revalidation is still a request -- resuming a
+    # national load would spend ~13,000 of them to download nothing, tripping
+    # the rate limit that stopped the first attempt.
+    [[ -s $path.sha256 ]] && return 0
+    # Present but unverified: the generated script downloads serially and writes
+    # no sidecar. Check it locally rather than fetching it again.
+    verify "$path" && return 0
   fi
 
   if out=$(wget --no-verbose --server-response --mirror --reject=html \
              --tries=3 --waitretry=10 --timeout=60 \
              --wait="${TIGER_DOWNLOAD_WAIT}" --random-wait "$url" 2>&1); then
-    return 0
+    verify "$path"
+    return
   fi
 
   if grep --quiet --extended-regexp 'HTTP/[0-9.]+ 429' <<<"$out"; then
