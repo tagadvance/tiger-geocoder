@@ -22,7 +22,6 @@ services:
       # Deliberately no default. tiger-prefetch picks one from the source:
       # gentle for rate-limited HTTPS, less so for the FTP mirror. Baking a
       # value in here would set the variable unconditionally and defeat that.
-      TIGER_DOWNLOAD_JOBS: "${TIGER_DOWNLOAD_JOBS:-}"
       TIGER_DOWNLOAD_WAIT: "${TIGER_DOWNLOAD_WAIT:-}"
       TIGER_WEBSITE_ROOT: "${TIGER_WEBSITE_ROOT:-}"
       # load  -- bulk ingest; trades crash safety for write throughput.

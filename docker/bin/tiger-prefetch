@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # Pre-warm the Census download cache for a generated loader script.
 #
-# The generated scripts fetch serially, which is the single biggest cost of a
-# load on a fast link. Rather than rewrite their logic, run the exact wget lines
-# they contain, in parallel, from the same working directory. wget --mirror then
-# finds the files already present and skips them on the real pass.
+# Rather than rewrite the generated scripts' fetch logic, run the exact wget
+# lines they contain, one at a time, from the same working directory. wget
+# --mirror then finds the files already present and skips them on the real pass.
+# What this buys is not speed -- it is the checksum verification, the shared
+# cache, and the clean stop on a rate limit, none of which the generated script
+# does.
 #
 # www2.census.gov sits behind Cloudflare, which rate-limits. Tripping it returns
 # 429 for *every* request with a Retry-After measured in the thousands of
 # seconds -- an hour-long block observed in practice. Two consequences shape
 # this script:
 #
-#   Pace requests. TIGER_DOWNLOAD_WAIT puts a gap between retrievals in each
-#   worker, so the request rate is roughly jobs/wait per second rather than as
-#   fast as the link allows. A national load is ~13,000 files; sustained flat
-#   out, it will trip the limit.
+#   Pace requests. One request at a time, with TIGER_DOWNLOAD_WAIT between
+#   them. Parallelism was measured to buy nothing here -- the FTP mirror caps
+#   per-client bandwidth, so 8 workers ran no faster than 4 -- while over HTTPS
+#   it is exactly what trips the limiter. A national load is ~13,000 files;
+#   sustained flat out, it will trip it.
 #
 #   Stop immediately on 429, rather than retrying. When the server says come
 #   back in an hour, retrying inside the run cannot succeed and only deepens the
@@ -24,11 +27,11 @@
 # Every other failure is soft. This script is an optimization, not the download:
 # the generated loader script does its own serial `wget --mirror` pass, which
 # skips whatever is already on disk and fetches whatever is not. So a file this
-# script could not get in parallel -- an FTP control connection dropped, a reset
-# mid-transfer -- costs a slow serial fetch, not a dead run. Propagating it
-# instead is how one transient error out of ~13,000 files used to abort an
-# eight-hour load at its first state, taking the rest of the batch and the index
-# build with it. A file that is genuinely gone rather than briefly unreachable
+# script could not get -- an FTP control connection dropped, a reset
+# mid-transfer -- costs a repeat fetch in the loader's own pass, not a dead run.
+# Propagating it instead is how one transient error out of ~13,000 files used to
+# abort an eight-hour load at its first state, taking the rest of the batch and
+# the index build with it. A file that is genuinely gone rather than briefly unreachable
 # is caught downstream by api.state_is_complete, which is what keeps a partial
 # state out of api.load_log.
 set -euo pipefail
@@ -48,16 +51,12 @@ if [[ ${#urls[@]} -eq 0 ]]; then
 fi
 
 # Pace according to where the files are coming from. The FTP mirror is not
-# behind the rate limiter, and it caps per-client bandwidth anyway -- 8 workers
-# measured no faster than 4 -- so there is nothing to gain by creeping and
-# nothing to fear by not. HTTPS is 20x faster per connection but blocks the
-# whole IP for up to an hour once tripped, and the limit is unpublished, so the
-# only sane default there is a gentle one. Explicit settings always win.
+# behind the rate limiter, so a short gap is enough. HTTPS blocks the whole IP
+# for up to an hour once tripped and the limit is unpublished, so the only sane
+# default there is a gentle one. An explicit setting always wins.
 if [[ ${urls[0]} == https://* ]]; then
-  jobs=${TIGER_DOWNLOAD_JOBS:-2}
   wait_secs=${TIGER_DOWNLOAD_WAIT:-2}
 else
-  jobs=${TIGER_DOWNLOAD_JOBS:-4}
   wait_secs=${TIGER_DOWNLOAD_WAIT:-0.5}
 fi
 
@@ -83,19 +82,16 @@ unify_cache() {
 }
 unify_cache
 
-work=$(mktemp --directory)
-trap 'rm --recursive --force "$work"' EXIT
-export TIGER_RATELIMIT_SENTINEL="$work/ratelimited"
-export TIGER_SOFTFAIL_SENTINEL="$work/softfailed"
+# Fetching in one process means this is all just shell state -- no sentinel
+# files, no exported functions, no coordination between workers.
+ratelimit_retry=
+softfailed=0
 
-# Record a file this run could not fetch, and carry on. Appends are short and
-# O_APPEND, so concurrent workers do not interleave within a line.
-# shellcheck disable=SC2317
+# Record a file this run could not get, and carry on.
 soft_fail() {
-  printf 'prefetch: %s: %s -- leaving it to the loader'"'"'s serial pass\n' "$2" "$1" >&2
-  printf '%s\n' "$1" >>"$TIGER_SOFTFAIL_SENTINEL"
+  printf 'prefetch: %s: %s -- leaving it to the loader'"'"'s own pass\n' "$2" "$1" >&2
+  softfailed=$((softfailed + 1))
 }
-export -f soft_fail
 
 # Zip members carry CRC32s written by the Census, so testing the archive checks
 # the transfer against *their* checksums rather than merely against our own
@@ -107,7 +103,6 @@ export -f soft_fail
 # wget writes straight to the final filename with no staging: an interrupted
 # transfer leaves a truncated file that is indistinguishable, by name and
 # timestamp, from a finished one.
-# shellcheck disable=SC2317
 verify() {
   local path=$1
   if ! unzip -qq -t "$path" >/dev/null 2>&1; then
@@ -117,16 +112,10 @@ verify() {
   fi
   sha256sum "$path" | cut --delimiter=' ' --fields=1 >"$path.sha256"
 }
-export -f verify
 
-# Invoked by xargs through `bash -c`, not from this scope, which shellcheck
-# cannot see.
-# shellcheck disable=SC2317
 fetch() {
   local url=$1 out
   local path=${url#*://}
-  # Another worker already hit the limit; nothing this one does can help.
-  [[ -e $TIGER_RATELIMIT_SENTINEL ]] && return 0
 
   if [[ ${TIGER_DOWNLOAD_REVALIDATE:-false} != true && -s $path ]]; then
     # Verified already: skip without contacting the server. wget --mirror would
@@ -140,8 +129,8 @@ fetch() {
   fi
 
   # --retry-connrefused and a longer ladder than the default because the FTP
-  # mirror drops control connections under parallel load, and three tries over
-  # ~20s is not enough to ride out a server-side connection cap.
+  # mirror drops control connections, and three tries over ~20s is not enough to
+  # ride out a server-side connection cap.
   if out=$(wget --no-verbose --server-response --mirror --reject=html \
              --tries=5 --waitretry=30 --retry-connrefused --timeout=60 \
              --wait="${TIGER_DOWNLOAD_WAIT}" --random-wait "$url" 2>&1); then
@@ -150,45 +139,41 @@ fetch() {
   fi
 
   if grep --quiet --extended-regexp 'HTTP/[0-9.]+ 429' <<<"$out"; then
-    grep --ignore-case --only-matching --extended-regexp \
-      'Retry-After: *[0-9]+' <<<"$out" | grep --only-matching '[0-9]*$' \
-      | tail -1 > "$TIGER_RATELIMIT_SENTINEL" || true
+    ratelimit_retry=$(grep --ignore-case --only-matching --extended-regexp \
+      'Retry-After: *[0-9]+' <<<"$out" | grep --only-matching '[0-9]*$' | tail -1)
     return 1
   fi
 
   soft_fail "$url" "download failed"
   return 0
 }
-export -f fetch
 
-printf 'prefetching %d files with %d workers (%ss between requests)\n' \
-  "${#urls[@]}" "$jobs" "$wait_secs" >&2
+printf 'prefetching %d files (%ss between requests)\n' \
+  "${#urls[@]}" "$wait_secs" >&2
 cd "$staging"
 
-rc=0
-printf '%s\n' "${urls[@]}" \
-  | TIGER_DOWNLOAD_WAIT="$wait_secs" \
-      TIGER_DOWNLOAD_REVALIDATE="${TIGER_DOWNLOAD_REVALIDATE:-false}" \
-      xargs --no-run-if-empty \
-      --max-procs="$jobs" --max-args=1 \
-      bash -c 'fetch "$@"' _ || rc=$?
+TIGER_DOWNLOAD_WAIT=$wait_secs
+TIGER_DOWNLOAD_REVALIDATE=${TIGER_DOWNLOAD_REVALIDATE:-false}
+for url in "${urls[@]}"; do
+  # The only failure fetch reports is a rate limit, and nothing later in the
+  # list can succeed once the server is refusing every request.
+  fetch "$url" || break
+done
 
-if [[ -s $TIGER_RATELIMIT_SENTINEL ]]; then
-  retry=$(<"$TIGER_RATELIMIT_SENTINEL")
+if [[ -n $ratelimit_retry ]]; then
+  retry=$ratelimit_retry
   printf '\nprefetch: rate limited by the Census server (HTTP 429).\n' >&2
   printf 'Retry-After: %s seconds (~%s minutes).\n' "$retry" "$((retry / 60))" >&2
   printf 'Nothing already downloaded is lost -- re-run after the wait and the\n' >&2
-  printf 'cache resumes where this stopped. Lower TIGER_DOWNLOAD_JOBS or raise\n' >&2
-  printf 'TIGER_DOWNLOAD_WAIT to avoid tripping it again.\n' >&2
+  printf 'cache resumes where this stopped. Raise TIGER_DOWNLOAD_WAIT to avoid\n' >&2
+  printf 'tripping it again, or switch to the FTP mirror.\n' >&2
   exit 75   # EX_TEMPFAIL: retry later, do not treat as a broken load
 fi
 
-if [[ -s $TIGER_SOFTFAIL_SENTINEL ]]; then
-  printf '\nprefetch: %d file(s) not fetched in parallel; the loader will fetch\n' \
-    "$(wc --lines <"$TIGER_SOFTFAIL_SENTINEL")" >&2
-  printf 'them serially. A file that is truly missing is caught by verification.\n' >&2
-elif [[ $rc -ne 0 ]]; then
-  printf 'prefetch: workers exited %d with no recorded failure\n' "$rc" >&2
+if [[ $softfailed -gt 0 ]]; then
+  printf '\nprefetch: %d file(s) not fetched; the loader will try them again in\n' \
+    "$softfailed" >&2
+  printf 'its own pass. A file that is truly missing is caught by verification.\n' >&2
 fi
 
 # Deliberately 0 unless rate limited: see the header. A prefetch problem must
