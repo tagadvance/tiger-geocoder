@@ -20,10 +20,15 @@ fi
 # entirely and run on stock defaults.
 if [[ ${1:-} == postgres && ${TIGER_TUNE:-true} == true ]]; then
   shift
+  # Captured first so that a failing tiger-tune is fatal. Read straight from a
+  # process substitution, its status is invisible to set -e, and postgres
+  # would start on stock or partial settings while this log line claimed
+  # otherwise -- noticed hours later, if at all, by the tuning test.
+  settings=$(tiger-tune)
   tuned=()
   while IFS= read -r setting; do
-    tuned+=(-c "$setting")
-  done < <(tiger-tune)
+    [[ -n $setting ]] && tuned+=(-c "$setting")
+  done <<<"$settings"
 
   printf 'tiger-tune: %s profile, %s\n' \
     "${TIGER_TUNE_PROFILE:-load}" "${tuned[*]}" >&2
