@@ -96,6 +96,14 @@ county set fails the state.
  faces  | county_coverage | t  | 1 of 1 counties
 ```
 
+Not everything the nation load says exists is actually published. American
+Samoa has no address ranges at all — five counties, no `addr` file for any of
+them. The loader records each file the Census answers "not published" for in
+`api.not_published`, and the verifier stops owing those counties; the detail
+column says so (`0 of 0 counties; 5 not published upstream`). A file that
+merely failed to arrive is not recorded and is still owed, which is the
+difference between "the Census does not have it" and "we did not get it".
+
 `ok` of `NULL` means **not checked**, which is deliberately not the same as
 passing. `featnames` and `addr` carry no `countyfp`, so their county coverage
 cannot be checked cheaply; `VERIFY_DEEP=true` recovers it by joining `tlid` to

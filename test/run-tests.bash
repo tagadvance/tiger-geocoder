@@ -67,6 +67,10 @@ expect_true "the api schema is present" \
   "SELECT count(*) = 3 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'api' AND p.proname IN ('geocode', 'reverse_geocode', 'coverage')"
 
+expect_true "the not-published ledger is present" \
+  "SELECT to_regclass('api.not_published') IS NOT NULL
+   AND to_regproc('api.record_not_published') IS NOT NULL"
+
 expect_true "the completeness verifier is present" \
   "SELECT count(*) = 2 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'api' AND p.proname IN ('verify_state', 'state_is_complete')"

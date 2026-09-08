@@ -92,6 +92,10 @@ generate() {
 	# Cloudflare session rather than presenting as a new client per file.
 	tiger_cookies=${TIGER_STAGING:-/gisdata}/cookies.txt
 	touch "$tiger_cookies"
+	# Files the Census answers "not published" for are listed here, one basename
+	# per line, and handed to api.not_published after the load so the verifier
+	# stops owing those counties. tiger-load truncates it before each state.
+	tiger_not_published=${TIGER_STAGING:-/gisdata}/not-published.txt
 
 	# The Census does not publish every layer for every county: over https that
 	# is a 404, over ftp a 550 on the file or its directory. Both are routine and
@@ -129,12 +133,9 @@ generate() {
 	          "$@" 2>&1) || rc=$?
 	  printf '%s\n' "$out" >&2
 
-	  if grep --quiet --extended-regexp "^No such (file|directory) '" <<<"$out"; then
+	  if grep --quiet --extended-regexp "ERROR (404|410)|^No such (file|directory) '" <<<"$out"; then
 	    printf 'wget: not published, skipping %s\n' "${url:-$*}" >&2
-	    return 0
-	  fi
-	  if grep --quiet --extended-regexp 'ERROR (404|410)' <<<"$out"; then
-	    printf 'wget: not published, skipping %s\n' "${url:-$*}" >&2
+	    [[ -n $url ]] && printf '%s\n' "${url##*/}" >>"$tiger_not_published"
 	    return 0
 	  fi
 	  # Refusals can arrive with exit 0 over ftp (a 425/426 after every retry),
@@ -223,6 +224,24 @@ drop_state_tables() {
   \$\$;"
 }
 
+# The generated script's wget wrapper lists each file the Census said it does
+# not publish. Hand that list to the database so the verifier stops owing those
+# counties. It replaces the state's previous list, so a reload starts clean and
+# an empty list clears it -- which is why this runs even when nothing was
+# listed. Names are validated here because they came from a text file.
+record_not_published() {
+  local upper=$1 file="${TIGER_STAGING}/not-published.txt" names=() name list=
+  [[ -f $file ]] && mapfile -t names <"$file"
+  for name in "${names[@]}"; do
+    [[ $name =~ ^[A-Za-z0-9_.-]+$ ]] || continue
+    list+="${list:+,}${name}"
+  done
+  query --command "SELECT api.record_not_published('${upper}', '{${list}}'::text[])" >/dev/null || return
+  if [[ -n $list ]]; then
+    log "${#names[@]} file(s) the Census does not publish for ${upper}; recorded for the verifier"
+  fi
+}
+
 # Exiting 0 is not proof a state loaded completely. nullglob keeps a missing file
 # from aborting the run, which necessarily makes it a silent skip instead, and
 # county-level layers are fetched one file per county -- so a state can lose a
@@ -272,12 +291,18 @@ load_states() {
       continue
     fi
     rc=0
+    : >"${TIGER_STAGING}/not-published.txt"
     run "$script" || rc=$?
 
     # 75 is not this state's failure: the Census is refusing every request, so
     # no state after it would fare any better. Stop the whole run, as before.
     if [[ $rc -eq 75 ]]; then
       exit 75
+    fi
+    if [[ $rc -eq 0 ]] && ! record_not_published "$upper"; then
+      log "could not record ${upper}'s unpublished files; skipping it"
+      failed_states+=("$upper")
+      continue
     fi
     if [[ $rc -ne 0 ]] || ! verify_loaded "$upper"; then
       log "re-run to retry ${upper}: its tables are dropped and reloaded on retry"

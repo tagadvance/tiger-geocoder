@@ -160,10 +160,12 @@ reset
 expect_eq "a 404 is not published: skipped, exit 0" \
   "rc=0" "$(wrapped_wget https://h.test/geo/tl_2025_11001_404.zip)"
 expect_grep "the skip is logged as not published" "not published, skipping" "$work/err"
+expect_grep "and the file is listed for the verifier" "^tl_2025_11001_404\.zip$" "$TIGER_STAGING/not-published.txt"
 
 reset
 expect_eq "an FTP 'No such file' is skipped too" \
   "rc=0" "$(wrapped_wget ftp://h.test/geo/tl_2025_11001_nofile.zip)"
+expect_grep "and listed for the verifier as well" "^tl_2025_11001_nofile\.zip$" "$TIGER_STAGING/not-published.txt"
 
 for code in 429 403 503; do
   reset
@@ -312,6 +314,21 @@ expect_eq "the states around it still load and are recorded" $'AA\nCC' "$(cat "$
 expect_grep "the failed state is named" "1 state\(s\) failed: BB" "$work/err"
 expect_grep "and told how to retry" "re-run to retry BB" "$work/err"
 expect_grep "the failing state's tables are dropped first" "DROP TABLE IF EXISTS tiger_data.%I" "$FAKE_LOG/psql"
+
+reset
+plan AA https://h.test/geo/aa.zip https://h.test/geo/tl_2025_01001_nofile.zip
+rc=$(load states AA)
+expect_eq "a state with a file the Census does not publish still loads" "0" "$rc"
+expect_grep "and the file is handed to the verifier" \
+  "record_not_published\('AA', '\{tl_2025_01001_nofile\.zip\}'::text\[\]\)" "$FAKE_LOG/psql"
+expect_grep "before the state is verified" \
+  "record_not_published.*state_is_complete\('AA'" <(tr '\n' ' ' <"$FAKE_LOG/psql")
+
+reset
+plan AA https://h.test/geo/aa.zip
+rc=$(load states AA)
+expect_grep "a state with nothing unpublished still clears its list" \
+  "record_not_published\('AA', '\{\}'::text\[\]\)" "$FAKE_LOG/psql"
 
 reset
 plan AA https://h.test/geo/aa.zip; plan BB https://h.test/geo/bb.zip; plan CC https://h.test/geo/cc.zip
