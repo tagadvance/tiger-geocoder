@@ -35,8 +35,8 @@ services:
       # then keeps its cluster in a major-version subdirectory (18/docker), which
       # is what lets a future `pg_upgrade --link` to PG19 run without crossing a
       # mount boundary. Mounting the old path is a hard error on these images.
-      - ./data:/var/lib/postgresql
-      - ./gisdata:/gisdata
+      - ./data:/var/lib/postgresql   # the database
+      - ./gisdata:/gisdata           # the Census download cache
     # No `command:` here on purpose. Settings are computed at startup by
     # tiger-tune, from the memory and cores this container can actually see, so
     # the same file is reasonable on a laptop and on a 16-core server. Pinned
