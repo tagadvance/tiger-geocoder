@@ -49,13 +49,14 @@ query() { psql --no-align --tuples-only --no-psqlrc --set ON_ERROR_STOP=1 "$@"; 
 # Set TIGER_WEBSITE_ROOT to an https:// root to go back, which is reasonable for
 # a single small state.
 set_website_root() {
-  local root=${TIGER_WEBSITE_ROOT:-}
+  local root=${TIGER_WEBSITE_ROOT:-} year
   if [[ -z $root ]]; then
-    root="ftp://ftp2.census.gov/geo/tiger/TIGER$(query --command \
-      'SELECT tiger_year FROM tiger.loader_variables' | tr --delete '[:space:]')"
+    year=$(query --command 'SELECT tiger_year FROM tiger.loader_variables' \
+      | tr --delete '[:space:]') || return
+    root="ftp://ftp2.census.gov/geo/tiger/TIGER${year}"
   fi
   query --command "UPDATE tiger.loader_variables SET website_root = '${root}'
-    WHERE website_root IS DISTINCT FROM '${root}'" >/dev/null
+    WHERE website_root IS DISTINCT FROM '${root}'" >/dev/null || return
   log "source ${root}"
 }
 
@@ -72,10 +73,14 @@ set_website_root() {
 # not the exit code, and stop the whole run on a refusal exactly as a rate limit
 # caught in prefetch does. Everything else stays fatal, 3 (file I/O error) above
 # all: that is how a full disk shows up.
+# Runs inside a command substitution, where errexit is off, so every step
+# reports its own failure. The caller must check the substitution's status:
+# otherwise a failed query yields a header-only script that runs clean, and
+# a load that did nothing exits 0.
 generate() {
   local name=$1 sql=$2
   local script="${TIGER_STAGING}/${name}.sh"
-  set_website_root
+  set_website_root || return
   log "generating ${name}"
   {
     cat <<-'HEADER'
@@ -160,8 +165,8 @@ generate() {
 	  fi
 	}
 	HEADER
-    query --command "$sql"
-  } >"$script"
+    query --command "$sql" || exit
+  } >"$script" || { rm --force "$script"; return 1; }
   chmod +x "$script"
   printf '%s' "$script"
 }
@@ -194,7 +199,10 @@ load_nation() {
     log "nation data already loaded; skipping (TIGER_RELOAD_NATION=1 to force)"
     return
   fi
-  run "$(generate nation "SELECT loader_generate_nation_script('${TIGER_PLATFORM}')")"
+  local script
+  script=$(generate nation "SELECT loader_generate_nation_script('${TIGER_PLATFORM}')") \
+    || { log "could not generate the nation script"; return 1; }
+  run "$script"
 }
 
 # The generated state script also creates its tables unconditionally. An
@@ -221,9 +229,15 @@ drop_state_tables() {
 # dozen counties and still look healthy. Assert completeness against the data
 # before recording the state as loaded, so that a failed load stays absent from
 # api.load_log and the next run drops and reloads it.
+# Deep by default: the shallow check cannot see county coverage for addr
+# and featnames, which are one file per county and exactly what a failed
+# download leaves short. Recording a state on a check that skips them is
+# how a half-loaded state gets into api.load_log and is then never
+# reloaded. The join costs minutes on a large state; the wrong answer costs
+# the state.
 verify_loaded() {
   local upper=$1
-  local deep=${TIGER_VERIFY_DEEP:-false}
+  local deep=${TIGER_VERIFY_DEEP:-true}
   if [[ $(query --command "SELECT api.state_is_complete('${upper}', ${deep})") == *t* ]]; then
     log "${upper} verified complete"
     return 0
@@ -236,7 +250,7 @@ verify_loaded() {
 }
 
 load_states() {
-  local state upper rc
+  local state upper rc script
   local failed_states=()
   for state in "$@"; do
     upper=${state^^}
@@ -246,10 +260,19 @@ load_states() {
       continue
     fi
     log "clearing any previous ${upper} tables"
-    drop_state_tables "$upper"
+    if ! drop_state_tables "$upper"; then
+      log "could not clear ${upper}; skipping it"
+      failed_states+=("$upper")
+      continue
+    fi
+    if ! script=$(generate "state_${state,,}" \
+        "SELECT loader_generate_script(ARRAY['${upper}'], '${TIGER_PLATFORM}')"); then
+      log "could not generate the ${upper} script; skipping it"
+      failed_states+=("$upper")
+      continue
+    fi
     rc=0
-    run "$(generate "state_${state,,}" \
-      "SELECT loader_generate_script(ARRAY['${upper}'], '${TIGER_PLATFORM}')")" || rc=$?
+    run "$script" || rc=$?
 
     # 75 is not this state's failure: the Census is refusing every request, so
     # no state after it would fare any better. Stop the whole run, as before.
@@ -261,10 +284,14 @@ load_states() {
       failed_states+=("$upper")
       continue
     fi
-    query --command "INSERT INTO api.load_log (state, tiger_year)
-      SELECT '${upper}', tiger_year FROM tiger.loader_variables
-      ON CONFLICT (state) DO UPDATE
-        SET tiger_year = EXCLUDED.tiger_year, loaded_at = now();"
+    if ! query --command "INSERT INTO api.load_log (state, tiger_year)
+        SELECT '${upper}', tiger_year FROM tiger.loader_variables
+        ON CONFLICT (state) DO UPDATE
+          SET tiger_year = EXCLUDED.tiger_year, loaded_at = now();" >/dev/null; then
+      log "${upper} loaded but could not be recorded; it will reload next run"
+      failed_states+=("$upper")
+      continue
+    fi
     log "loaded ${upper}"
   done
 
@@ -314,7 +341,13 @@ verify_states() {
   local deep=${TIGER_VERIFY_DEEP:-false}
   local failed=0 state
   if [[ ${#states[@]} -eq 0 ]]; then
-    mapfile -t states < <(query --command "SELECT state FROM api.load_log ORDER BY state")
+    # Into a variable first: mapfile from a process substitution cannot tell a
+    # failed query from an empty table.
+    local loaded
+    loaded=$(query --command "SELECT state FROM api.load_log ORDER BY state") \
+      || { log "could not read api.load_log"; return 2; }
+    mapfile -t states <<<"$loaded"
+    [[ -n ${states[0]:-} ]] || states=()
   fi
   if [[ ${#states[@]} -eq 0 ]]; then
     log "no states loaded"
@@ -362,7 +395,7 @@ status=0
 
 case "$command" in
   nation) load_nation ;;
-  states) require_states "${states[@]}"; load_states "${states[@]}" ;;
+  states) require_states "${states[@]}"; load_states "${states[@]}" || status=$? ;;
   index)  build_indexes ;;
   verify) verify_states "${states[@]}" ;;
   all)    require_states "${states[@]}"
