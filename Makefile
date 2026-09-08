@@ -61,8 +61,11 @@ verify: ## Completeness report for loaded states (VERIFY_DEEP=true for the slow,
 psql: ## Open a psql shell
 	$(EXEC) psql
 
+# The loader tests need no database: every tool is a fake on PATH, so they
+# run first and still report when the container is down.
 .PHONY: test
-test: ## Run the test suite against the running database
+test: ## Run the loader tests, then the suite against the running database
+	./test/loader-tests.bash
 	./test/run-tests.bash
 
 .PHONY: lint
