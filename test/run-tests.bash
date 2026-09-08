@@ -19,7 +19,9 @@ query() {
 
 expect_true() {
   local name=$1 sql=$2 actual
-  actual=$(query "$sql" | tr --delete '[:space:]')
+  # A SQL error must fail this test, not the suite: a plain assignment under
+  # set -e and pipefail would exit here with no FAIL line and no summary.
+  actual=$(query "$sql" 2>&1 | tr --delete '[:space:]') || actual="error:${actual:0:60}"
   if [[ $actual == "t" ]]; then
     printf 'ok       %s\n' "$name"
     passed=$((passed + 1))
