@@ -159,7 +159,13 @@ fetch() {
     return 1
   fi
 
-  soft_fail "$url" "download failed"
+  # Distinguish the two so the log does not cry wolf: a file the Census does
+  # not publish is routine and will be skipped by the loader's own pass too.
+  if grep --quiet --extended-regexp 'ERROR (404|410)|No such file' <<<"$out"; then
+    soft_fail "$url" "not published"
+  else
+    soft_fail "$url" "download failed"
+  fi
   return 0
 }
 

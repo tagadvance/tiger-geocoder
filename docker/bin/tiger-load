@@ -89,28 +89,40 @@ generate() {
 	touch "$tiger_cookies" 2>/dev/null || true
 
 	# The Census does not publish every layer for every county. That is routine
-	# and is skipped. A server refusing us is not, and stops the run: 75 is
-	# EX_TEMPFAIL, which tiger-load already treats as "come back later".
+	# and is skipped -- over https it is a 404, over ftp it is "No such file".
+	# A server refusing us is not routine and stops the run: 75 is EX_TEMPFAIL,
+	# which tiger-load already treats as "come back later".
 	wget() {
-	  local rc=0 arg url="$*" out
-	  out=$(command wget --continue --keep-session-cookies \
-	          --save-cookies="$tiger_cookies" --load-cookies="$tiger_cookies" \
-	          "$@" 2>&1) || rc=$?
-	  printf '%s\n' "$out" >&2
-	  [[ $rc -eq 0 ]] && return 0
+	  local rc=0 arg url= out path
 	  for arg in "$@"; do
 	    if [[ $arg == *://* ]]; then
 	      url=$arg
 	      break
 	    fi
 	  done
-	  if grep --quiet --extended-regexp 'ERROR (404|410)' <<<"$out"; then
-	    printf 'wget: not published, skipping %s\n' "$url" >&2
+
+	  # A file tiger-prefetch already fetched and checksummed needs no request
+	  # at all. Without this, --mirror still issues a conditional GET per file,
+	  # so every file is fetched once and revalidated once -- ~26,000 round
+	  # trips for a national load instead of ~13,000, and a rebuild from a
+	  # complete cache would still be entirely at the mercy of the rate limiter.
+	  if [[ -n $url ]]; then
+	    path=${TIGER_STAGING:-/gisdata}/${url#*://}
+	    [[ -s $path && -s $path.sha256 ]] && return 0
+	  fi
+
+	  out=$(command wget --continue --keep-session-cookies \
+	          --save-cookies="$tiger_cookies" --load-cookies="$tiger_cookies" \
+	          "$@" 2>&1) || rc=$?
+	  printf '%s\n' "$out" >&2
+	  [[ $rc -eq 0 ]] && return 0
+	  if grep --quiet --extended-regexp 'ERROR (404|410)|No such file' <<<"$out"; then
+	    printf 'wget: not published, skipping %s\n' "${url:-$*}" >&2
 	    return 0
 	  fi
 	  if grep --quiet --extended-regexp 'ERROR (429|403|5[0-9][0-9])' <<<"$out"; then
 	    printf 'wget: the server is refusing requests; stopping rather than\n' >&2
-	    printf 'loading states from files that never arrived: %s\n' "$url" >&2
+	    printf 'loading states from files that never arrived: %s\n' "${url:-$*}" >&2
 	    exit 75
 	  fi
 	  return "$rc"
