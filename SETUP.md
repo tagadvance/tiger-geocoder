@@ -69,8 +69,9 @@ upstream loader fails quietly:
   index the geocode functions rely on. Skip `make index` and you get a geocoder
   that works and is unusably slow.
 
-Data volume is not modest. DC alone is ~100 MB of downloads; a national load is
-in the hundreds of gigabytes once indexed. Load only the states you need.
+Data volume is not modest. DC alone is ~100 MB of downloads; the full national
+set, measured on TIGER 2025, is a 30 GB download cache (`./gisdata`) and a 96 GB
+database once indexed (`./data`). Load only the states you need.
 
 ## Verifying a load
 

@@ -32,8 +32,8 @@ That is the complete set — 50 states, DC, and five territories. **Trim it to
 what you need**; a single state is `make load STATES=OH`, and states are loaded
 independently, so a shorter list is a smaller and faster load in every respect.
 
-Loading everything is a day's work and hundreds of gigabytes once indexed.
-A single small state is minutes. `make` on its own lists the targets.
+Loading everything takes about a day and ends at a 30 GB download cache and
+a 96 GB database, indexed. A single small state is minutes. `make` on its own lists the targets.
 
 ## Querying it
 
