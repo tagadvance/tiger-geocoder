@@ -69,8 +69,12 @@ unify_cache() {
     [[ -L $path ]] && continue
     if [[ -d $path ]]; then
       # Hard links where possible: same filesystem, no second copy of 30GB.
-      cp --archive --link "$path/." "$canonical/" 2>/dev/null \
-        || cp --archive "$path/." "$canonical/"
+      # --no-clobber: a file already in the canonical tree has been verified
+      # there, and its sidecar must not outlive a copy that replaces it. A
+      # whole-tree cp without it also fails on the first conflict and leaves
+      # the host directory in place, wedging every later run the same way.
+      cp --archive --link --no-clobber "$path/." "$canonical/" 2>/dev/null \
+        || cp --archive --no-clobber "$path/." "$canonical/"
       rm --recursive --force "$path"
     fi
     ln --symbolic --no-target-directory "$canonical" "$path"
@@ -139,9 +143,14 @@ fetch() {
   # ride out a server-side connection cap.
   # --continue so a transfer cut short mid-file resumes on the next --tries
   # attempt instead of starting over; the Census serves Accept-Ranges: bytes.
-  if out=$(wget --no-verbose --server-response --mirror --reject=html \
+  # --tries only covers network errors; a 5xx is final on the first attempt
+  # unless listed here. Cloudflare's 52x are the origin being unwell, which
+  # is exactly the transient case -- one such reply should cost a retry, not
+  # the run. 429 is deliberately absent: retrying inside a block deepens it.
+  if out=$(LC_ALL=C wget --no-verbose --server-response --mirror --reject=html \
              --tries=5 --waitretry=30 --retry-connrefused --timeout=60 \
-             --continue --keep-session-cookies \
+             --retry-on-http-error=500,502,503,504,520,521,522,523,524 \
+             --continue --no-if-modified-since --keep-session-cookies \
              --save-cookies="$cookies" --load-cookies="$cookies" \
              --wait="$wait_secs" --random-wait "$url" 2>&1); then
     verify "$path" || soft_fail "$url" "corrupt after download"
@@ -159,9 +168,14 @@ fetch() {
     return 1
   fi
 
+  # A transfer that failed every retry leaves a partial file with a fresh
+  # mtime. The loader's own pass would then take it for complete -- newer
+  # than the server's copy -- and hand a truncated zip to unzip. Discard it
+  # so that pass fetches from nothing.
+  rm --force "$path" "$path.sha256"
   # Distinguish the two so the log does not cry wolf: a file the Census does
   # not publish is routine and will be skipped by the loader's own pass too.
-  if grep --quiet --extended-regexp 'ERROR (404|410)|No such file' <<<"$out"; then
+  if grep --quiet --extended-regexp "ERROR (404|410)|^No such (file|directory) '" <<<"$out"; then
     soft_fail "$url" "not published"
   else
     soft_fail "$url" "download failed"
