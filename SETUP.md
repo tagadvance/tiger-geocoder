@@ -109,3 +109,9 @@ passing. `featnames` and `addr` carry no `countyfp`, so their county coverage
 cannot be checked cheaply; `VERIFY_DEEP=true` recovers it by joining `tlid` to
 `edges`, at the cost of a join between two of the largest tables in the schema.
 `place` has no county dimension at all and stays unchecked either way.
+
+`tabblock20` is unchecked for a different reason: it is the 2020 Census block
+layer, and its county codes are frozen to 2020 geography while `county_all` is
+current. Connecticut replaced its eight counties with nine planning regions in
+2022, so there the two disagree completely and no comparison against current
+codes can pass. The layer's row count is still checked.

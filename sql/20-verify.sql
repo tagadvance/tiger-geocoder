@@ -139,6 +139,23 @@ BEGIN
 
 		actual := NULL;
 
+		-- tabblock20 is the 2020 Census block layer; its GEOID20 is frozen to 2020
+		-- geography and so is its countyfp. county_all is current. They agree
+		-- everywhere a county has not been redrawn since 2020 -- and disagree
+		-- entirely in Connecticut, which replaced eight counties with nine
+		-- planning regions in 2022: the layer holds 001-015, county_all holds
+		-- 110-190, and no county-coverage check against current codes can pass.
+		-- Comparing against the 2020 county list would be exact, but nothing
+		-- here holds one, and the block id is an optional attribute the geocoder
+		-- does not match on. So it is not checked, and says so; not_empty above
+		-- still guards against the layer being skipped.
+		IF rec.lookup_name = 'tabblock20' THEN
+			RETURN QUERY SELECT
+				rec.lookup_name::text, 'county_coverage'::text, NULL::boolean,
+				'not checked: 2020 Census geography; county codes predate boundary changes since'::text;
+			CONTINUE;
+		END IF;
+
 		IF EXISTS (
 			SELECT 1 FROM pg_attribute a
 			WHERE a.attrelid = qualified::regclass
