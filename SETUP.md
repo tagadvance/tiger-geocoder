@@ -20,6 +20,21 @@ database itself, `./gisdata` is the Census download cache. Both are bind mounts
 rather than named volumes, so they are ordinary directories you can inspect,
 copy, or move — see [BACKUP.md](BACKUP.md).
 
+## Updating the schema
+
+The SQL under `sql/` — the `api` schema, the loader profile, the verifier — is
+applied once by `initdb`, on an empty `./data`, and never again. When a change
+to it lands after that, an existing database does not pick it up on `make up`.
+Re-apply it by hand:
+
+```sh
+make build && make up     # the files come from the image
+make schema
+```
+
+Everything under `sql/` is written to be re-applied safely (`IF NOT EXISTS`,
+`OR REPLACE`, `ON CONFLICT`), so this is harmless to run at any time.
+
 ## Loading data
 
 `tiger-load` runs inside the container and takes a subcommand:

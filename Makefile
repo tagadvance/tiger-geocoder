@@ -61,6 +61,15 @@ verify: ## Completeness report for loaded states (VERIFY_DEEP=true for the slow,
 psql: ## Open a psql shell
 	$(EXEC) psql
 
+# initdb applies sql/ once, on an empty PGDATA, and never again. A change to it
+# after that -- a new check, a new ledger -- reaches an existing database only
+# by re-applying it. Everything under sql/ is idempotent, so this is safe to
+# run at any time; the files come from the image, so rebuild first.
+.PHONY: schema
+schema: ## Re-apply sql/*.sql to the running database (rebuild first)
+	$(EXEC) sh -c 'for f in /usr/local/share/tiger-geocoder/*.sql; do \
+		psql --set ON_ERROR_STOP=1 --no-psqlrc --file "$$f" || exit 1; done' 
+
 # The loader tests need no database: every tool is a fake on PATH, so they
 # run first and still report when the container is down.
 .PHONY: test
