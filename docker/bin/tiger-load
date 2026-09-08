@@ -83,12 +83,19 @@ generate() {
 	set -euo pipefail
 	shopt -s nullglob
 
+	# Share the prefetch cookie jar so the serial pass continues the same
+	# Cloudflare session rather than presenting as a new client per file.
+	tiger_cookies=${TIGER_STAGING:-/gisdata}/cookies.txt
+	touch "$tiger_cookies" 2>/dev/null || true
+
 	# The Census does not publish every layer for every county. That is routine
 	# and is skipped. A server refusing us is not, and stops the run: 75 is
 	# EX_TEMPFAIL, which tiger-load already treats as "come back later".
 	wget() {
 	  local rc=0 arg url="$*" out
-	  out=$(command wget "$@" 2>&1) || rc=$?
+	  out=$(command wget --continue --keep-session-cookies \
+	          --save-cookies="$tiger_cookies" --load-cookies="$tiger_cookies" \
+	          "$@" 2>&1) || rc=$?
 	  printf '%s\n' "$out" >&2
 	  [[ $rc -eq 0 ]] && return 0
 	  for arg in "$@"; do
