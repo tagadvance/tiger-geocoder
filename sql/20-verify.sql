@@ -78,6 +78,7 @@ DECLARE
 	owed text[];
 	actual text[];
 	missing text[];
+	has_tlid boolean;
 BEGIN
 	SELECT s.statefp INTO fips
 	FROM tiger_data.state_all s WHERE s.stusps = upper(abbrev);
@@ -156,6 +157,11 @@ BEGIN
 			CONTINUE;
 		END IF;
 
+		has_tlid := EXISTS (
+			SELECT 1 FROM pg_attribute a
+			WHERE a.attrelid = qualified::regclass
+			  AND a.attname = 'tlid' AND a.attnum > 0 AND NOT a.attisdropped);
+
 		IF EXISTS (
 			SELECT 1 FROM pg_attribute a
 			WHERE a.attrelid = qualified::regclass
@@ -164,14 +170,24 @@ BEGIN
 			EXECUTE format(
 				'SELECT array_agg(DISTINCT countyfp ORDER BY countyfp) FROM %s', qualified)
 			INTO actual;
-		ELSIF deep
-			AND to_regclass(format('tiger_data.%I', edges_table)) IS NOT NULL
-			AND EXISTS (
-				SELECT 1 FROM pg_attribute a
-				WHERE a.attrelid = qualified::regclass
-				  AND a.attname = 'tlid' AND a.attnum > 0 AND NOT a.attisdropped
-			)
-		THEN
+		ELSIF NOT has_tlid THEN
+			-- place: no countyfp, no tlid. Nothing to join through, in any mode.
+			RETURN QUERY SELECT
+				rec.lookup_name::text, 'county_coverage'::text, NULL::boolean,
+				'not checked: this layer has no county dimension'::text;
+			CONTINUE;
+		ELSIF NOT deep THEN
+			RETURN QUERY SELECT
+				rec.lookup_name::text, 'county_coverage'::text, NULL::boolean,
+				'not checked: no countyfp column (pass deep => true to join via edges.tlid)'::text;
+			CONTINUE;
+		ELSIF to_regclass(format('tiger_data.%I', edges_table)) IS NULL THEN
+			RETURN QUERY SELECT
+				rec.lookup_name::text, 'county_coverage'::text, NULL::boolean,
+				format('not checked: tiger_data.%s is missing, so tlid cannot be mapped to a county',
+					edges_table)::text;
+			CONTINUE;
+		ELSE
 			-- featnames and addr carry no countyfp. They do carry tlid, which
 			-- edges maps to a county, so coverage is recoverable -- at the cost
 			-- of a join across two of the largest tables in the schema.
@@ -180,11 +196,6 @@ BEGIN
 				 FROM %s f JOIN tiger_data.%I e ON e.tlid = f.tlid',
 				qualified, edges_table)
 			INTO actual;
-		ELSE
-			RETURN QUERY SELECT
-				rec.lookup_name::text, 'county_coverage'::text, NULL::boolean,
-				'not checked: no countyfp column (pass deep => true to join via edges.tlid)'::text;
-			CONTINUE;
 		END IF;
 
 		SELECT array_agg(c ORDER BY c) INTO missing
