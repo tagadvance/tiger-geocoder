@@ -134,9 +134,14 @@ fetch() {
     return 0
   fi
 
-  if grep --quiet --extended-regexp 'HTTP/[0-9.]+ 429' <<<"$out"; then
+  # A refusal is global: 429 is the documented rate limit, 403 is Cloudflare
+  # blocking outright, and 5xx means the origin is unwell. None of them get
+  # better by trying the next file, and continuing loads states from files that
+  # never arrived. Retry-After is only present on a 429.
+  if grep --quiet --extended-regexp 'HTTP/[0-9.]+ (429|403|5[0-9][0-9])' <<<"$out"; then
     ratelimit_retry=$(grep --ignore-case --only-matching --extended-regexp \
       'Retry-After: *[0-9]+' <<<"$out" | grep --only-matching '[0-9]*$' | tail -1)
+    ratelimit_retry=${ratelimit_retry:-0}
     return 1
   fi
 
@@ -157,8 +162,10 @@ done
 
 if [[ -n $ratelimit_retry ]]; then
   retry=$ratelimit_retry
-  printf '\nprefetch: rate limited by the Census server (HTTP 429).\n' >&2
-  printf 'Retry-After: %s seconds (~%s minutes).\n' "$retry" "$((retry / 60))" >&2
+  printf '\nprefetch: the Census server is refusing requests.\n' >&2
+  if [[ $retry -gt 0 ]]; then
+    printf 'Retry-After: %s seconds (~%s minutes).\n' "$retry" "$((retry / 60))" >&2
+  fi
   printf 'Nothing already downloaded is lost -- re-run after the wait and the\n' >&2
   printf 'cache resumes where this stopped. Use the FTP mirror to avoid it.\n' >&2
   exit 75   # EX_TEMPFAIL: retry later, do not treat as a broken load

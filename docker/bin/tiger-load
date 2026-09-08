@@ -61,13 +61,17 @@ set_website_root() {
 
 # nullglob above is only half the fix: the wget that was meant to fetch a file
 # the Census does not have exits 8 first and aborts the script under -e, long
-# before the loop nullglob protects is reached. Wrap wget so the two codes that
-# mean "the file did not arrive" -- 4, network failure, and 8, server issued an
-# error response -- are a notice rather than the end of a 22-hour load.
-# Everything else stays fatal, 3 (file I/O error) above all: that is how a full
-# disk shows up, and swallowing it would leave a half-loaded state looking
-# finished. api.state_is_complete is the backstop for a file that really should
-# have been there.
+# before the loop nullglob protects is reached. Wrap wget so a file that is
+# genuinely not published is a notice rather than the end of a 22-hour load.
+#
+# But exit 8 is every 4xx and 5xx collapsed into one number, and the difference
+# matters: 404 means this file does not exist and the next one will be fine,
+# while 429/403/5xx mean the server is refusing us and nothing later will fare
+# any better. Skipping the second kind is how a Cloudflare block once failed 29
+# states in a row while the run reported progress. So classify on the status,
+# not the exit code, and stop the whole run on a refusal exactly as a rate limit
+# caught in prefetch does. Everything else stays fatal, 3 (file I/O error) above
+# all: that is how a full disk shows up.
 generate() {
   local name=$1 sql=$2
   local script="${TIGER_STAGING}/${name}.sh"
@@ -79,24 +83,30 @@ generate() {
 	set -euo pipefail
 	shopt -s nullglob
 
-	# The Census does not publish every layer for every county, and a transient
-	# server error is not worth losing the run over. Completeness is asserted
-	# against the loaded data afterwards, not against these exit codes.
+	# The Census does not publish every layer for every county. That is routine
+	# and is skipped. A server refusing us is not, and stops the run: 75 is
+	# EX_TEMPFAIL, which tiger-load already treats as "come back later".
 	wget() {
-	  local rc=0 arg url="$*"
-	  command wget "$@" || rc=$?
-	  case $rc in
-	    0) return 0 ;;
-	    4 | 8) ;;
-	    *) return "$rc" ;;
-	  esac
+	  local rc=0 arg url="$*" out
+	  out=$(command wget "$@" 2>&1) || rc=$?
+	  printf '%s\n' "$out" >&2
+	  [[ $rc -eq 0 ]] && return 0
 	  for arg in "$@"; do
 	    if [[ $arg == *://* ]]; then
 	      url=$arg
 	      break
 	    fi
 	  done
-	  printf 'wget: exit %d, skipping %s\n' "$rc" "$url" >&2
+	  if grep --quiet --extended-regexp 'ERROR (404|410)' <<<"$out"; then
+	    printf 'wget: not published, skipping %s\n' "$url" >&2
+	    return 0
+	  fi
+	  if grep --quiet --extended-regexp 'ERROR (429|403|5[0-9][0-9])' <<<"$out"; then
+	    printf 'wget: the server is refusing requests; stopping rather than\n' >&2
+	    printf 'loading states from files that never arrived: %s\n' "$url" >&2
+	    exit 75
+	  fi
+	  return "$rc"
 	}
 	HEADER
     query --command "$sql"
