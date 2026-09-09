@@ -174,10 +174,11 @@ else
       "SELECT count(*) = 0 FROM api.verify_state('DC', deep => true)
        WHERE check_name = 'county_coverage' AND ok IS FALSE"
 
-    # A verifier that cannot fail is worthless, so prove it fails on a state
-    # that was never loaded.
-    expect_true "verification rejects a state that was never loaded" \
-      "SELECT NOT api.state_is_complete('RI')"
+    # A verifier that cannot fail is worthless, so prove it fails. ZZ is not a
+    # state, so this holds however many real ones are loaded; the original
+    # used RI and broke the day all 56 were.
+    expect_true "verification rejects a state that does not exist" \
+      "SELECT NOT api.state_is_complete('ZZ')"
 
     expect_true "coverage reports DC" \
       "SELECT count(*) = 1 FROM api.coverage() WHERE state = 'DC' AND tiger_year = '2025'"
