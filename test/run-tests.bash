@@ -67,6 +67,14 @@ expect_true "the api schema is present" \
   "SELECT count(*) = 3 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'api' AND p.proname IN ('geocode', 'reverse_geocode', 'coverage')"
 
+# sql/30-performance-fixes.sql overrides four extension functions. An
+# ALTER EXTENSION ... UPDATE silently reinstalls upstream's versions; this is
+# how you find out.
+expect_true "the geocoder performance fixes are applied (run make schema if not)" \
+  "SELECT (SELECT prosrc LIKE '%substring(trim(%' FROM pg_proc WHERE proname = 'least_hn')
+      AND (SELECT prosrc LIKE '%regexp_replace(trim(substring(%' FROM pg_proc WHERE proname = 'diff_zip')
+      AND (SELECT prosrc LIKE '%\$2 !~ ''''^[0-9]''''%' FROM pg_proc WHERE proname = 'geocode_address')"
+
 expect_true "the not-published ledger is present" \
   "SELECT to_regclass('api.not_published') IS NOT NULL
    AND to_regproc('api.record_not_published') IS NOT NULL"

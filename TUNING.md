@@ -143,3 +143,19 @@ time, one second apart, from either mirror. The FTP mirror caps per-client
 bandwidth, so extra workers measured no faster than one; over https, concurrency
 and haste are precisely what trip Cloudflare's limiter. The only download choice
 is which mirror, via `WEBSITE_ROOT`.
+
+## Pending upstream
+
+`sql/30-performance-fixes.sql` overrides four functions of the
+`postgis_tiger_geocoder` extension with versions that are being proposed
+upstream: three one-line helpers rewritten so PostgreSQL can inline them (about
++25% throughput), and `geocode_address` with one guard that stops a numbered
+street name from soundex-matching every other numbered road in the state (the
+worst single address went from 10 s to 3 s, and nothing that matched before
+stopped matching). The file explains each; the measurements are in the
+benchmark notes.
+
+They are applied by `initdb` and by `make schema`. An `ALTER EXTENSION …
+UPDATE` reinstalls upstream's versions and undoes them silently — run
+`make schema` after any extension upgrade. `make test` checks they are in place.
+Delete the file when the installed release includes the fixes.
