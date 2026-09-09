@@ -88,6 +88,14 @@ expect_true "the server was tuned for this host" \
 # gets OOM-killed mid-load rather than at startup where you would notice.
 # pg_settings.setting, not current_setting(): the latter renders a unit suffix
 # ("1003MB") that will not cast, while both of these are plain kB here.
+# One geocode locks every child of five inheritance parents before the planner
+# prunes to a state: 2,886 locks, measured on a 56-state load. At the default 64
+# the table holds two geocodes and the third fails with "out of shared memory"
+# -- found by a benchmark, not by anything single-threaded. The threshold is the
+# measured figure, so every connection can geocode at once.
+expect_true "the lock table lets every connection geocode at once" \
+  "SELECT setting::bigint >= 2886 FROM pg_settings WHERE name = 'max_locks_per_transaction'"
+
 expect_true "autovacuum memory is capped independently of maintenance_work_mem" \
   "SELECT av.setting::bigint > 0 AND av.setting::bigint <= mw.setting::bigint
    FROM pg_settings av, pg_settings mw

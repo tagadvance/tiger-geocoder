@@ -65,6 +65,7 @@ convention rather than a limit.
 | `autovacuum_work_mem` | ¼ of the above, ≤ 2 GB | See below -- this one is not optional |
 | `max_worker_processes`, `max_parallel_workers` | physical cores | SMT siblings share execution units; counting them inflates the pools past what the box can run |
 | `max_parallel_workers_per_gather`, `max_parallel_maintenance_workers` | half the cores | So one query or index build cannot monopolise the machine |
+| `max_locks_per_transaction` | 4096 | Every state table inherits from the `tiger` parents, and `geocode()` locks every child of five parents before pruning to one state: **2,886 locks per call, measured**. The default table (64 × `max_connections`) holds two geocodes at once; the third gets "out of shared memory". 4096 exceeds the per-call figure, so every connection can geocode at the same time |
 | `random_page_cost` | 1.1 | Assumes an SSD. On spinning disks set `TIGER_TUNE_RANDOM_PAGE_COST=4` |
 | `effective_io_concurrency`, `maintenance_io_concurrency` | 64 | The default of 16 is priced for a single spindle; these feed the bitmap heap scans `geocode()` leans on |
 | `default_statistics_target` | 200 | Costs a slower `ANALYZE` once at the end of the load, and buys better plans against tables that never change again |

@@ -129,6 +129,17 @@ autovacuum_work_mem=$(clamp $(( maintenance_work_mem / 4 )) 64 $(( 2 * 1024 )) )
 # operation cannot monopolise the machine.
 per_query=$(clamp $(( cores / 2 )) 2 "$cores")
 
+# Every state's tables inherit from tiger.featnames, addr, edges, faces and
+# place, and geocode() queries the parents with WHERE statefp = ... Before the
+# planner can prune to one state it opens and locks every child table and every
+# child index. Measured on a full 56-state load: 2,886 AccessShareLocks held by
+# a single geocode. The lock table holds max_locks_per_transaction *
+# max_connections entries -- 6,400 at the defaults, room for two geocodes at
+# once; the third fails with "out of shared memory". 4096 exceeds the measured
+# figure, so every connection can geocode simultaneously rather than some of
+# them. Each entry is a few hundred bytes: ~90 MB once, at 100 connections.
+max_locks_per_transaction=4096
+
 cat <<SETTINGS
 shared_buffers=${shared_buffers}MB
 effective_cache_size=${effective_cache_size}MB
@@ -139,6 +150,7 @@ max_worker_processes=${cores}
 max_parallel_workers=${cores}
 max_parallel_workers_per_gather=${per_query}
 max_parallel_maintenance_workers=${per_query}
+max_locks_per_transaction=${max_locks_per_transaction}
 random_page_cost=${TIGER_TUNE_RANDOM_PAGE_COST:-1.1}
 effective_io_concurrency=${TIGER_TUNE_IO_CONCURRENCY:-64}
 maintenance_io_concurrency=${TIGER_TUNE_IO_CONCURRENCY:-64}
