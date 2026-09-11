@@ -278,12 +278,14 @@ expect_eq "and the refetched copy is verified" \
   "$(sha256sum "$FAKE_ZIP" | cut --delimiter=' ' --fields=1)" "$(cat "$TIGER_STAGING/h.test/geo/torn.zip.sha256")"
 
 reset
-mkdir --parents "$TIGER_STAGING/www2.census.gov/geo/tiger"
+mkdir --parents "$TIGER_STAGING/www2.census.gov/geo/tiger" "$TIGER_STAGING/census-cache"
 cp "$FAKE_ZIP" "$TIGER_STAGING/www2.census.gov/geo/tiger/old.zip"
+# A cache from before the links were relative.
+ln --symbolic --no-target-directory "$TIGER_STAGING/census-cache" "$TIGER_STAGING/ftp.census.gov"
 prefetch 'wget --mirror ftp://ftp2.census.gov/geo/tiger/new.zip' >/dev/null
 for host in www2.census.gov ftp2.census.gov ftp.census.gov; do
-  expect_eq "unify_cache: ${host} is a symlink to census-cache" \
-    "$TIGER_STAGING/census-cache" "$(readlink "$TIGER_STAGING/$host")"
+  expect_eq "unify_cache: ${host} is a relative symlink to census-cache" \
+    "census-cache" "$(readlink "$TIGER_STAGING/$host")"
 done
 expect_file "unify_cache: the https download moved into the shared cache" "$TIGER_STAGING/census-cache/geo/tiger/old.zip"
 expect_file "unify_cache: the ftp download lands in the shared cache" "$TIGER_STAGING/census-cache/geo/tiger/new.zip"

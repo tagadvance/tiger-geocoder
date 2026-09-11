@@ -66,8 +66,7 @@ unify_cache() {
   mkdir --parents "$canonical"
   for host in www2.census.gov ftp2.census.gov ftp.census.gov; do
     path=$staging/$host
-    [[ -L $path ]] && continue
-    if [[ -d $path ]]; then
+    if [[ -d $path && ! -L $path ]]; then
       # Hard links where possible: same filesystem, no second copy of 30GB.
       # --no-clobber: a file already in the canonical tree has been verified
       # there, and its sidecar must not outlive a copy that replaces it. A
@@ -77,7 +76,9 @@ unify_cache() {
         || cp --archive --no-clobber "$path/." "$canonical/"
       rm --recursive --force "$path"
     fi
-    ln --symbolic --no-target-directory "$canonical" "$path"
+    # Relative, so the link survives the cache being archived or mounted
+    # somewhere else. Re-made every run: an older cache holds absolute links.
+    ln --symbolic --relative --force --no-target-directory "$canonical" "$path"
   done
 }
 unify_cache
