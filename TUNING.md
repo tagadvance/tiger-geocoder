@@ -148,12 +148,14 @@ is which mirror, via `WEBSITE_ROOT`.
 
 `sql/30-performance-fixes.sql` overrides four functions of the
 `postgis_tiger_geocoder` extension with versions that are being proposed
-upstream: three one-line helpers rewritten so PostgreSQL can inline them (about
-+25% throughput), and `geocode_address` with one guard that stops a numbered
-street name from soundex-matching every other numbered road in the state (the
-worst single address went from 10 s to 3 s, and nothing that matched before
-stopped matching). The file explains each; the measurements are in the
-benchmark notes.
+upstream, and adds one helper. The three one-line ranking helpers are rewritten
+so PostgreSQL can inline them; `geocode_address` stops a numbered street from
+soundex-matching every other numbered road in the state, and names the state's
+own tables in its dynamic SQL instead of the parents, so the planner no longer
+locks every state's tables on every call. Together, upstream to carried:
+117 to 223 geocodes per second on 16 cores, and nothing that matched before
+stops matching. The measurements and how to repeat them are in
+[bench/README.md](bench/README.md).
 
 They are applied by `initdb` and by `make schema`. An `ALTER EXTENSION …
 UPDATE` reinstalls upstream's versions and undoes them silently — run
