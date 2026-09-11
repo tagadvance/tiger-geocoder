@@ -83,14 +83,25 @@ BEGIN
 	-- Rd NE, 66871" becomes Nebraska and "998 2500 N Shelby Co, 62550" becomes
 	-- Colorado, and geocode_address then trusts that state over the zip and
 	-- returns a confidently rated match from the wrong one. The zip is the
-	-- more reliable of the two, so where they disagree it wins. The ORDER BY
-	-- keeps the parsed state when the zip legitimately spans two states; an
-	-- unknown zip leaves the parse untouched.
+	-- more reliable of the two, so where they disagree it wins; an unknown zip
+	-- leaves the parse untouched.
+	--
+	-- zip_state is built per state from that state's own edges, so a zip whose
+	-- delivery area crosses a state line is claimed by both: 68355 (Falls City,
+	-- NE) also appears under KS. The USPS assigns three-digit prefixes by
+	-- state, and the owning state has far more zips under the prefix than the
+	-- neighbour it spills into (683: 71 NE, 7 KS), so that census decides and
+	-- the parsed state breaks whatever tie remains.
 	addy.stateabbrev := COALESCE((
 		SELECT z.stusps
 		FROM zip_state AS z
 		WHERE z.zip = addy.zip
-		ORDER BY z.stusps = addy.stateabbrev DESC, z.stusps
+		ORDER BY (SELECT count(*)
+		          FROM zip_state AS p
+		          WHERE p.stusps = z.stusps
+		            AND p.zip BETWEEN left(addy.zip, 3) || '00' AND left(addy.zip, 3) || '99') DESC,
+		         z.stusps = addy.stateabbrev DESC,
+		         z.stusps
 		LIMIT 1
 	), addy.stateabbrev);
 

@@ -169,6 +169,23 @@ else
       "SELECT count(*) = 1 AND max(state) = 'DC'
        FROM api.geocode('1731 New Hampshire Ave NW, Washington, MD 20009', 1)"
 
+    # zip_state is built per state from that state's own edges, so a zip whose
+    # delivery area crosses a state line is claimed by both states. Have Alabama
+    # claim 20009: it sorts before DC, and if the guard picks it the search runs
+    # in a state with nothing loaded and finds nothing.
+    query "DELETE FROM ONLY tiger.zip_state WHERE zip = '20009' AND stusps = 'AL';
+           INSERT INTO tiger.zip_state (zip, stusps, statefp) VALUES ('20009', 'AL', '01')" >/dev/null
+
+    expect_true "a zip claimed by two states goes to the one that owns its prefix" \
+      "SELECT count(*) = 1 AND max(state) = 'DC'
+       FROM api.geocode('1731 New Hampshire Ave NW, Washington 20009', 1)"
+
+    expect_true "the prefix outranks a parsed state that also claims the zip" \
+      "SELECT count(*) = 1 AND max(state) = 'DC'
+       FROM api.geocode('1731 New Hampshire Ave NW, Washington, AL 20009', 1)"
+
+    query "DELETE FROM ONLY tiger.zip_state WHERE zip = '20009' AND stusps = 'AL'" >/dev/null
+
     # Left unsplit, a zip+4 matches nothing in zip_state and the result takes
     # the zip penalty, so equal ratings show the split happened.
     expect_true "a nine-digit zip geocodes as well as its five-digit prefix" \
