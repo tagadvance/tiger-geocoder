@@ -1,0 +1,8 @@
+# Benchmark-only overlay: preload pg_stat_statements so nested statements can be
+# broken down into planning vs execution time. Use with:
+#   docker compose -f compose.yaml -f bench/compose.pgss.yaml up --detach
+# tiger-tune's flags still come first (the entrypoint prepends them); this only
+# appends. Drop the -f to go back to normal.
+services:
+  db:
+    command: [postgres, -c, shared_preload_libraries=pg_stat_statements]

@@ -79,7 +79,7 @@ test: ## Run the loader tests, then the suite against the running database
 
 .PHONY: lint
 lint: ## Shellcheck every script
-	shellcheck docker/bin/* docker/initdb/*.sh test/*.bash
+	shellcheck docker/bin/* docker/initdb/*.sh test/*.bash bench/*.sh
 
 # PGDATA is a bind mount, so a snapshot is just a tarball of a directory -- but
 # the cluster belongs to the container's postgres user and is mode 700, so a
