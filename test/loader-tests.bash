@@ -294,6 +294,13 @@ expect_eq "unify_cache: the same file over https is a cache hit" "1" "$(wc --lin
 rc=$(prefetch 'echo re-run')
 expect_eq "unify_cache: a second run over the symlinks is a no-op" "0" "$rc"
 
+echo "-- tiger-tune"
+tune_workers() { # cores -> max_worker_processes
+  TIGER_TUNE_CORES=$1 TIGER_TUNE_PROFILE=serve "$bin/tiger-tune" | sed --quiet 's/^max_worker_processes=//p'
+}
+expect_eq "max_worker_processes keeps PostgreSQL's default floor on a small host" "8" "$(tune_workers 2)"
+expect_eq "and follows the core count above it" "16" "$(tune_workers 16)"
+
 echo "-- tiger-load: states"
 
 load() { # args... -> prints exit code; stderr to $work/err

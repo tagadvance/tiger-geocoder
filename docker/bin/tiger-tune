@@ -129,6 +129,12 @@ autovacuum_work_mem=$(clamp $(( maintenance_work_mem / 4 )) 64 $(( 2 * 1024 )) )
 # operation cannot monopolise the machine.
 per_query=$(clamp $(( cores / 2 )) 2 "$cores")
 
+# max_worker_processes is not a pool but the ceiling on background workers of
+# every kind, and an extension or a replication subscription that cannot
+# register one fails at startup. On a small host the core count is below
+# PostgreSQL's own default of 8; an unused slot costs bytes, so keep the floor.
+max_worker_processes=$(( cores > 8 ? cores : 8 ))
+
 # Every state's tables inherit from tiger.featnames, addr, edges, faces and
 # place, and geocode() queries the parents with WHERE statefp = ... Before the
 # planner can prune to one state it opens and locks every child table and every
@@ -146,7 +152,7 @@ effective_cache_size=${effective_cache_size}MB
 work_mem=${work_mem}MB
 maintenance_work_mem=${maintenance_work_mem}MB
 autovacuum_work_mem=${autovacuum_work_mem}MB
-max_worker_processes=${cores}
+max_worker_processes=${max_worker_processes}
 max_parallel_workers=${cores}
 max_parallel_workers_per_gather=${per_query}
 max_parallel_maintenance_workers=${per_query}
