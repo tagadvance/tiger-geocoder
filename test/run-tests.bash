@@ -165,8 +165,10 @@ else
     # 20009 is a DC zip; the state says otherwise. Upstream trusts the state,
     # which with only DC loaded means no match at all -- the same path a
     # misparsed 'NE' or 'Co' takes on a full load, minus the wrong answer.
+    # The rating bound matters: when the street search finds nothing, upstream
+    # falls back to the zip's centroid at rating 100, which is in DC too.
     expect_true "a zip that contradicts the parsed state wins" \
-      "SELECT count(*) = 1 AND max(state) = 'DC'
+      "SELECT count(*) = 1 AND max(state) = 'DC' AND max(rating) <= 20
        FROM api.geocode('1731 New Hampshire Ave NW, Washington, MD 20009', 1)"
 
     # zip_state is built per state from that state's own edges, so a zip whose
@@ -177,11 +179,11 @@ else
            INSERT INTO tiger.zip_state (zip, stusps, statefp) VALUES ('20009', 'AL', '01')" >/dev/null
 
     expect_true "a zip claimed by two states goes to the one that owns its prefix" \
-      "SELECT count(*) = 1 AND max(state) = 'DC'
+      "SELECT count(*) = 1 AND max(state) = 'DC' AND max(rating) <= 20
        FROM api.geocode('1731 New Hampshire Ave NW, Washington 20009', 1)"
 
     expect_true "the prefix outranks a parsed state that also claims the zip" \
-      "SELECT count(*) = 1 AND max(state) = 'DC'
+      "SELECT count(*) = 1 AND max(state) = 'DC' AND max(rating) <= 20
        FROM api.geocode('1731 New Hampshire Ave NW, Washington, AL 20009', 1)"
 
     query "DELETE FROM ONLY tiger.zip_state WHERE zip = '20009' AND stusps = 'AL'" >/dev/null
