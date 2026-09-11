@@ -1,5 +1,5 @@
--- Two geocoder performance fixes carried here until they land upstream in
--- postgis_tiger_geocoder. Both were found by benchmarking the full 56-state load
+-- Three geocoder performance fixes carried here until they land upstream in
+-- postgis_tiger_geocoder. All were found by benchmarking the full 56-state load
 -- and are written up in tmp/UPSTREAM.md (rsync-only). Remove this file when the
 -- installed release includes them.
 --
@@ -85,8 +85,53 @@ $$;
 -- noise. Verified by geocoding the same 2,000 addresses before and after: zero
 -- matches lost, zero gained; worst case 10.2 s -> 3.2 s, +14% throughput.
 --
--- This is upstream's geocode_address (2025.2) with that one guard added, so it
--- is long. The change is the single line containing:  $2 !~ ''^[0-9]''
+-- The change is the single line containing:  $2 !~ ''^[0-9]''
+
+-- 3. geocode_address: query the state's own tables, not the inheritance parents.
+--
+-- Every dynamic statement in geocode_address names the inheritance parents --
+-- tiger.featnames, tiger.addr, tiger.edges, tiger.faces, tiger.place and the zip
+-- tables -- and filters on statefp. Each parent has one child per loaded state,
+-- so with 56 states the planner opens and locks about 280 tables and 2,600
+-- indexes per statement before constraint exclusion throws 55 states' worth
+-- away; and because the statements are built as strings and run with EXECUTE,
+-- no plan is ever cached and the work is repeated on every call.
+-- pg_stat_statements with track_planning put planning at ~35 ms of a ~95 ms
+-- geocode, 66-97% of the time of the four main statements, and a single
+-- geocode took 2,886 locks -- that is the child tables being opened.
+--
+-- The function already knows the state (in_statefp for the first pass, each
+-- zip_state row's statefp in the fallback loop -- a zip can span two states, so
+-- the fallback derives it per iteration). When it does, the statements now name
+-- tiger_data.<st>_<table> directly and the planner opens a handful of relations
+-- instead of ~280. state_table() picks the child, or falls back to the parent
+-- when the state is unknown or that state is not loaded. tiger.state,
+-- tiger.county and tiger.zcta5 have one national child each and are left alone,
+-- as is the static zip_lookup_base lookup that discovers the state in the first
+-- place. Same joins, filters and column lists; only the relation names change.
+CREATE OR REPLACE FUNCTION tiger.state_table(st text, parent text)
+RETURNS text
+LANGUAGE sql STABLE
+AS $$
+	SELECT CASE
+		WHEN to_regclass('tiger_data.' || $1 || '_' || $2) IS NOT NULL
+			THEN 'tiger_data.' || $1 || '_' || $2
+		ELSE 'tiger.' || $2
+	END;
+$$;
+
+-- Self-test: fall back to the parent for an unknown or unloaded state.
+DO $$
+BEGIN
+	IF NOT (tiger.state_table(NULL, 'featnames') = 'tiger.featnames'
+		AND tiger.state_table('no_such_state', 'featnames') = 'tiger.featnames') THEN
+		RAISE EXCEPTION 'tiger.state_table does not fall back to the parent; see sql/30-performance-fixes.sql';
+	END IF;
+END
+$$;
+
+-- This is upstream's geocode_address (2025.2) with fixes 2 and 3 applied, so it
+-- is long.
 CREATE OR REPLACE FUNCTION tiger.geocode_address(IN parsed tiger.norm_addy, max_results integer DEFAULT 10, restrict_geom public.geometry DEFAULT NULL, OUT addy tiger.norm_addy, OUT geomout public.geometry, OUT rating integer)
   RETURNS SETOF record AS
 $$
@@ -103,6 +148,16 @@ DECLARE
   var_bfilter text := null;
   var_bestrating integer := NULL;
   var_zip_penalty numeric := tiger.get_geocode_setting('zip_penalty')::numeric*1.00;
+  var_st text;
+  t_featnames text;
+  t_addr text;
+  t_edges text;
+  t_faces text;
+  t_place text;
+  t_cousub text;
+  t_zip_lookup_base text;
+  t_zip_state text;
+  t_zip_state_loc text;
 BEGIN
   IF parsed.streetName IS NULL THEN
     -- A street name must be given.  Think about it.
@@ -119,6 +174,16 @@ BEGIN
   --if state is not provided or was bogus, just pick the first where the zip is present
     in_statefp := statefp FROM tiger.zip_lookup_base WHERE zip = substring(parsed.zip,1,5) LIMIT 1;
   END IF;
+
+  var_st := lower(abbrev) FROM tiger.state_lookup As s WHERE s.statefp = in_statefp;
+  t_featnames := tiger.state_table(var_st, 'featnames');
+  t_addr := tiger.state_table(var_st, 'addr');
+  t_edges := tiger.state_table(var_st, 'edges');
+  t_faces := tiger.state_table(var_st, 'faces');
+  t_place := tiger.state_table(var_st, 'place');
+  t_zip_lookup_base := tiger.state_table(var_st, 'zip_lookup_base');
+  t_zip_state := tiger.state_table(var_st, 'zip_state');
+  t_zip_state_loc := tiger.state_table(var_st, 'zip_state_loc');
 
   IF restrict_geom IS NOT NULL THEN
   		IF public.ST_SRID(restrict_geom) < 1 OR public.ST_SRID(restrict_geom) = 4236 THEN
@@ -146,7 +211,7 @@ BEGIN
     --This signals bad zip input, only use the range if it falls in the place zip range
     IF length(parsed.zip) != 5 AND parsed.location IS NOT NULL THEN
          stmt := 'SELECT ARRAY(SELECT DISTINCT zip
-          FROM tiger.zip_lookup_base AS z
+          FROM ' || t_zip_lookup_base || ' AS z
          WHERE z.statefp = $1
                AND  z.zip = ANY($3) AND lower(z.city) LIKE lower($2) || ''%''::text '  || COALESCE(' AND z.zip IN(' || var_bfilter || ')', '') || ')::varchar[] AS zip ORDER BY zip' ;
          EXECUTE stmt INTO zip_info USING in_statefp, parsed.location, zip_info.zip;
@@ -166,7 +231,7 @@ BEGIN
   -- If no good zips just include all for the location
   -- We do a like instead of absolute check since tiger sometimes tacks things like Town at end of places
     stmt := 'SELECT ARRAY(SELECT DISTINCT zip
-          FROM tiger.zip_lookup_base AS z
+          FROM ' || t_zip_lookup_base || ' AS z
          WHERE z.statefp = $1
                AND  lower(z.city) LIKE lower($2) || ''%''::text '  || COALESCE(' AND z.zip IN(' || var_bfilter || ')', '') || ')::varchar[] AS zip ORDER BY zip' ;
     EXECUTE stmt INTO zip_info USING in_statefp, parsed.location;
@@ -192,7 +257,7 @@ BEGIN
          || '    sufdirabrv, prequalabr)
 							)
 						As rank
-                		FROM tiger.featnames As f INNER JOIN tiger.addr As ad ON (f.tlid = ad.tlid)
+                		FROM ' || t_featnames || ' As f INNER JOIN ' || t_addr || ' As ad ON (f.tlid = ad.tlid)
                     WHERE $10 = f.statefp AND $10 = ad.statefp
                     	'
                     || CASE WHEN length(parsed.streetName) > 5  THEN ' AND (lower(f.fullname) LIKE (COALESCE($5 || '' '','''') || lower($2) || ''%'')::text OR lower(f.name) = lower($2) OR public.soundex(f.name) = public.soundex($2) ) ' ELSE  ' AND lower(f.name) = lower($2) ' END
@@ -249,10 +314,10 @@ BEGIN
                 a.zip,
                 p.name as place
 
-                FROM  a INNER JOIN tiger.edges As b ON (a.statefp = b.statefp AND a.tlid = b.tlid  '
+                FROM  a INNER JOIN ' || t_edges || ' As b ON (a.statefp = b.statefp AND a.tlid = b.tlid  '
                || ')
-                    INNER JOIN tiger.faces AS f ON ($10 = f.statefp AND ( (b.tfidl = f.tfid AND a.side = ''L'') OR (b.tfidr = f.tfid AND a.side = ''R'' ) ))
-                    INNER JOIN tiger.place p ON ($10 = p.statefp AND f.placefp = p.placefp '
+                    INNER JOIN ' || t_faces || ' AS f ON ($10 = f.statefp AND ( (b.tfidl = f.tfid AND a.side = ''L'') OR (b.tfidr = f.tfid AND a.side = ''R'' ) ))
+                    INNER JOIN ' || t_place || ' p ON ($10 = p.statefp AND f.placefp = p.placefp '
           || CASE WHEN parsed.location > '' AND zip_info.zip IS NULL THEN ' AND ( lower(p.name) LIKE (lower($3::text) || ''%'')  ) ' ELSE '' END
           || ')
                 WHERE a.statefp = $10  AND  b.statefp = $10   '
@@ -344,25 +409,25 @@ BEGIN
   -- In the end, we *have* to find a statefp, one way or another.
   var_sql :=
   ' SELECT statefp,location,a.zip,exact,min(pref) FROM
-    (SELECT tiger.zip_state.statefp as statefp,$1 as location, true As exact, ARRAY[tiger.zip_state.zip] as zip,1 as pref
-        FROM tiger.zip_state WHERE tiger.zip_state.zip = $2
-            AND (' || quote_nullable(in_statefp) || ' IS NULL OR tiger.zip_state.statefp = ' || quote_nullable(in_statefp) || ')
-          ' || COALESCE(' AND tiger.zip_state.zip IN(' || var_bfilter || ')', '') ||
-        ' UNION SELECT tiger.zip_state_loc.statefp,tiger.zip_state_loc.place As location,false As exact, array_agg(tiger.zip_state_loc.zip) AS zip,1 + abs(COALESCE(tiger.diff_zip(max(zip), $2),0) - COALESCE(tiger.diff_zip(min(zip), $2),0))*$3 As pref
-              FROM tiger.zip_state_loc
-             WHERE tiger.zip_state_loc.statefp = ' || quote_nullable(in_statefp) || '
-                   AND lower($1) = lower(tiger.zip_state_loc.place) '  || COALESCE(' AND tiger.zip_state_loc.zip IN(' || var_bfilter || ')', '') ||
-        '     GROUP BY tiger.zip_state_loc.statefp,tiger.zip_state_loc.place
-      UNION SELECT tiger.zip_state_loc.statefp,tiger.zip_state_loc.place As location,false As exact, array_agg(tiger.zip_state_loc.zip),3
-              FROM tiger.zip_state_loc
-             WHERE tiger.zip_state_loc.statefp = ' || quote_nullable(in_statefp) || '
-                   AND public.soundex($1) = public.soundex(tiger.zip_state_loc.place)
-             GROUP BY tiger.zip_state_loc.statefp,tiger.zip_state_loc.place
-      UNION SELECT tiger.zip_lookup_base.statefp,tiger.zip_lookup_base.city As location,false As exact, array_agg(tiger.zip_lookup_base.zip),4
-              FROM tiger.zip_lookup_base
-             WHERE tiger.zip_lookup_base.statefp = ' || quote_nullable(in_statefp) || '
-                         AND (public.soundex($1) = public.soundex(tiger.zip_lookup_base.city) OR public.soundex($1) = public.soundex(tiger.zip_lookup_base.county))
-             GROUP BY tiger.zip_lookup_base.statefp,tiger.zip_lookup_base.city
+    (SELECT zip_state.statefp as statefp,$1 as location, true As exact, ARRAY[zip_state.zip] as zip,1 as pref
+        FROM ' || t_zip_state || ' AS zip_state WHERE zip_state.zip = $2
+            AND (' || quote_nullable(in_statefp) || ' IS NULL OR zip_state.statefp = ' || quote_nullable(in_statefp) || ')
+          ' || COALESCE(' AND zip_state.zip IN(' || var_bfilter || ')', '') ||
+        ' UNION SELECT zip_state_loc.statefp,zip_state_loc.place As location,false As exact, array_agg(zip_state_loc.zip) AS zip,1 + abs(COALESCE(tiger.diff_zip(max(zip), $2),0) - COALESCE(tiger.diff_zip(min(zip), $2),0))*$3 As pref
+              FROM ' || t_zip_state_loc || ' AS zip_state_loc
+             WHERE zip_state_loc.statefp = ' || quote_nullable(in_statefp) || '
+                   AND lower($1) = lower(zip_state_loc.place) '  || COALESCE(' AND zip_state_loc.zip IN(' || var_bfilter || ')', '') ||
+        '     GROUP BY zip_state_loc.statefp,zip_state_loc.place
+      UNION SELECT zip_state_loc.statefp,zip_state_loc.place As location,false As exact, array_agg(zip_state_loc.zip),3
+              FROM ' || t_zip_state_loc || ' AS zip_state_loc
+             WHERE zip_state_loc.statefp = ' || quote_nullable(in_statefp) || '
+                   AND public.soundex($1) = public.soundex(zip_state_loc.place)
+             GROUP BY zip_state_loc.statefp,zip_state_loc.place
+      UNION SELECT zip_lookup_base.statefp,zip_lookup_base.city As location,false As exact, array_agg(zip_lookup_base.zip),4
+              FROM ' || t_zip_lookup_base || ' AS zip_lookup_base
+             WHERE zip_lookup_base.statefp = ' || quote_nullable(in_statefp) || '
+                         AND (public.soundex($1) = public.soundex(zip_lookup_base.city) OR public.soundex($1) = public.soundex(zip_lookup_base.county))
+             GROUP BY zip_lookup_base.statefp,zip_lookup_base.city
       UNION SELECT ' || quote_nullable(in_statefp) || ' As statefp,$1 As location,false As exact,NULL, 5) as a '
       ' WHERE a.statefp IS NOT NULL
       GROUP BY statefp,location,a.zip,exact, pref ORDER BY exact desc, pref, zip';
@@ -390,6 +455,14 @@ BEGIN
       WHERE statefp IS NOT NULL
       GROUP BY statefp,location,zip,exact, pref ORDER BY exact desc, pref, zip  **/
   FOR zip_info IN EXECUTE var_sql USING parsed.location, parsed.zip, var_zip_penalty  LOOP
+    var_st := lower(abbrev) FROM tiger.state_lookup As s WHERE s.statefp = zip_info.statefp;
+    t_featnames := tiger.state_table(var_st, 'featnames');
+    t_addr := tiger.state_table(var_st, 'addr');
+    t_edges := tiger.state_table(var_st, 'edges');
+    t_faces := tiger.state_table(var_st, 'faces');
+    t_place := tiger.state_table(var_st, 'place');
+    t_cousub := tiger.state_table(var_st, 'cousub');
+    t_zip_lookup_base := tiger.state_table(var_st, 'zip_lookup_base');
   -- For zip distance metric we consider both the distance of zip based on numeric as well aa levenshtein
   -- We use the prequalabr (these are like Old, that may or may not appear in front of the street name)
   -- We also treat pretypabr as fetype since in normalize we treat these as streetypes  and highways usually have the type here
@@ -435,7 +508,7 @@ BEGIN
          || '            AND $1::integer <= tiger.greatest_hn(b.fromhn,b.tohn) '
          || '            AND ($1 % 2)::numeric::integer = (to_number(b.fromhn,''99999999'') % 2)'
          || '    as exact_address, a.name, a.prequalabr, a.pretypabrv '
-         || '  FROM tiger.featnames a join tiger.addr b ON (a.tlid = b.tlid AND a.statefp = b.statefp  )'
+         || '  FROM ' || t_featnames || ' a join ' || t_addr || ' b ON (a.tlid = b.tlid AND a.statefp = b.statefp  )'
          || '  WHERE'
          || '        a.statefp = ' || quote_literal(zip_info.statefp) || ' AND a.mtfcc LIKE ''S%''  '
          || coalesce('    AND b.zip IN (''' || array_to_string(zip_info.zip,''',''') || ''') ','')
@@ -446,14 +519,14 @@ BEGIN
          || '  ORDER BY 11'
          || '  LIMIT 200'
          || '    ) AS sub'
-         || '  JOIN tiger.edges e ON (' || quote_literal(zip_info.statefp) || ' = e.statefp AND sub.tlid = e.tlid AND e.mtfcc LIKE ''S%'' '
+         || '  JOIN ' || t_edges || ' e ON (' || quote_literal(zip_info.statefp) || ' = e.statefp AND sub.tlid = e.tlid AND e.mtfcc LIKE ''S%'' '
          ||   CASE WHEN var_restrict_geom IS NOT NULL THEN ' AND public.ST_Intersects(e.the_geom, $8) '  ELSE '' END || ') '
          || '  JOIN tiger.state s ON (' || quote_literal(zip_info.statefp) || ' = s.statefp)'
-         || '  JOIN tiger.faces f ON (' || quote_literal(zip_info.statefp) || ' = f.statefp AND (e.tfidl = f.tfid OR e.tfidr = f.tfid))'
-         || '  LEFT JOIN tiger.zip_lookup_base zip ON (sub.zip = zip.zip AND zip.statefp=' || quote_literal(zip_info.statefp) || ')'
-         || '  LEFT JOIN tiger.place p ON (' || quote_literal(zip_info.statefp) || ' = p.statefp AND f.placefp = p.placefp)'
+         || '  JOIN ' || t_faces || ' f ON (' || quote_literal(zip_info.statefp) || ' = f.statefp AND (e.tfidl = f.tfid OR e.tfidr = f.tfid))'
+         || '  LEFT JOIN ' || t_zip_lookup_base || ' zip ON (sub.zip = zip.zip AND zip.statefp=' || quote_literal(zip_info.statefp) || ')'
+         || '  LEFT JOIN ' || t_place || ' p ON (' || quote_literal(zip_info.statefp) || ' = p.statefp AND f.placefp = p.placefp)'
          || '  LEFT JOIN tiger.county co ON (' || quote_literal(zip_info.statefp) || ' = co.statefp AND f.countyfp = co.countyfp)'
-         || '  LEFT JOIN tiger.cousub cs ON (' || quote_literal(zip_info.statefp) || ' = cs.statefp AND cs.cosbidfp = sub.statefp || co.countyfp || f.cousubfp)'
+         || '  LEFT JOIN ' || t_cousub || ' cs ON (' || quote_literal(zip_info.statefp) || ' = cs.statefp AND cs.cosbidfp = sub.statefp || co.countyfp || f.cousubfp)'
          || ' WHERE'
          || '  ( (sub.side = ''L'' and e.tfidl = f.tfid) OR (sub.side = ''R'' and e.tfidr = f.tfid) ) '
          || ' ORDER BY 1,2,3,4,5,6,7,9'
