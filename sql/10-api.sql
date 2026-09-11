@@ -14,9 +14,11 @@ CREATE SCHEMA IF NOT EXISTS api;
 COMMENT ON SCHEMA api IS
 	'Stable contract over the tiger geocoder. Bind here, not to tiger internals.';
 
-CREATE OR REPLACE FUNCTION api.geocode(
-	address text,
-	max_results integer DEFAULT 1
+-- Internal. Both geocode entry points build a norm_addy and come through here,
+-- so the flattening lives once.
+CREATE OR REPLACE FUNCTION api.geocode_normalized(
+	addy tiger.norm_addy,
+	max_results integer
 )
 RETURNS TABLE (
 	rating integer,
@@ -46,12 +48,103 @@ AS $$
 		(g.addy).stateabbrev::text,
 		(g.addy).zip::text,
 		pprint_addy(g.addy)
-	FROM geocode(geocode.address, geocode.max_results) AS g
+	FROM geocode(geocode_normalized.addy, geocode_normalized.max_results) AS g
 	ORDER BY g.rating;
+$$;
+
+COMMENT ON FUNCTION api.geocode_normalized(tiger.norm_addy, integer) IS
+	'Internal. Bind to api.geocode or api.geocode_parts instead.';
+
+CREATE OR REPLACE FUNCTION api.geocode(
+	address text,
+	max_results integer DEFAULT 1
+)
+RETURNS TABLE (
+	rating integer,
+	longitude double precision,
+	latitude double precision,
+	street_number text,
+	street text,
+	street_type text,
+	city text,
+	state text,
+	zip text,
+	formatted text
+)
+LANGUAGE sql
+STABLE
+PARALLEL SAFE
+SET search_path = tiger, public
+AS $$
+	SELECT *
+	FROM api.geocode_normalized(normalize_address(geocode.address), geocode.max_results);
 $$;
 
 COMMENT ON FUNCTION api.geocode(text, integer) IS
 	'Geocode a free-form US address. Lower rating is a better match; 0 is exact.';
+
+-- For callers that already hold the address as components. On input with no
+-- city ("600 N Sheridan St, 61832") the parser misassigns the trailing tokens
+-- -- street "N", city "Sheridan St" -- on about a quarter of inputs; this
+-- bypasses it. Not an overload of api.geocode: with (text, integer) and
+-- (text, text, ...) both present, a call whose second argument is an untyped
+-- literal or driver parameter would resolve silently to this one.
+--
+-- The input names differ from the output columns because RETURNS TABLE columns
+-- are parameters too, and a name cannot be used for both.
+CREATE OR REPLACE FUNCTION api.geocode_parts(
+	house_number text,
+	street_name text,
+	street_suffix text DEFAULT NULL,
+	pre_direction text DEFAULT NULL,
+	post_direction text DEFAULT NULL,
+	city_name text DEFAULT NULL,
+	state_code text DEFAULT NULL,
+	zip_code text DEFAULT NULL,
+	max_results integer DEFAULT 1
+)
+RETURNS TABLE (
+	rating integer,
+	longitude double precision,
+	latitude double precision,
+	street_number text,
+	street text,
+	street_type text,
+	city text,
+	state text,
+	zip text,
+	formatted text
+)
+LANGUAGE sql
+STABLE
+PARALLEL SAFE
+SET search_path = tiger, public
+AS $$
+	-- Field order is norm_addy's. address/address_alphanumeric follow the
+	-- parser: the leading digits as the integer, the raw token alongside, since
+	-- matching reads only the integer.
+	SELECT n.*
+	FROM api.geocode_normalized(
+		ROW(
+			substring(geocode_parts.house_number FROM '^[0-9]+')::integer,
+			geocode_parts.pre_direction,
+			geocode_parts.street_name,
+			geocode_parts.street_suffix,
+			geocode_parts.post_direction,
+			NULL,
+			geocode_parts.city_name,
+			geocode_parts.state_code,
+			left(geocode_parts.zip_code, 5),
+			true,
+			substring(geocode_parts.zip_code FROM '^[0-9]{5}-?([0-9]{4})$'),
+			geocode_parts.house_number
+		)::tiger.norm_addy,
+		geocode_parts.max_results
+	) AS n;
+$$;
+
+COMMENT ON FUNCTION api.geocode_parts(text, text, text, text, text, text, text, text, integer) IS
+	'Geocode an address already split into components, bypassing the free-text parser. Suffix abbreviated as USPS does (St, Ave); zip may be 5 or 9 digits.';
 
 CREATE OR REPLACE FUNCTION api.reverse_geocode(
 	longitude double precision,

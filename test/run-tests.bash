@@ -64,8 +64,16 @@ expect_true "normalize_address parses a street address" \
    FROM normalize_address('1 Devonshire Place, Boston, MA 02109')"
 
 expect_true "the api schema is present" \
-  "SELECT count(*) = 3 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-   WHERE n.nspname = 'api' AND p.proname IN ('geocode', 'reverse_geocode', 'coverage')"
+  "SELECT count(*) = 5 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'api' AND p.proname IN ('geocode', 'geocode_parts', 'geocode_normalized', 'reverse_geocode', 'coverage')"
+
+expect_true "the structured geocode entry point has the documented signature" \
+  "SELECT to_regprocedure('api.geocode_parts(text, text, text, text, text, text, text, text, integer)') IS NOT NULL"
+
+# With neither state nor zip, upstream returns before touching a table, so this
+# runs on an empty database and proves the norm_addy row construction casts.
+expect_true "geocode_parts builds a norm_addy without data" \
+  "SELECT count(*) = 0 FROM api.geocode_parts('600A', 'Sheridan', 'St', 'N')"
 
 # sql/30-performance-fixes.sql overrides four extension functions. An
 # ALTER EXTENSION ... UPDATE silently reinstalls upstream's versions; this is
@@ -138,6 +146,34 @@ else
       "SELECT bool_and(longitude BETWEEN -77.2 AND -76.9
                    AND latitude BETWEEN 38.7 AND 39.1)
        FROM api.geocode('1731 New Hampshire Avenue Northwest, Washington, DC 20010', 1)"
+
+    # The parser needs no help with this input; the point is that bypassing
+    # it lands on the same segment the text form does.
+    expect_true "a structured geocode of the DC address matches the text form" \
+      "WITH t AS (
+         SELECT longitude, latitude
+         FROM api.geocode('1731 New Hampshire Avenue Northwest, Washington, DC 20010', 1)
+       ), p AS (
+         SELECT *
+         FROM api.geocode_parts('1731', 'New Hampshire', 'Ave', NULL, 'NW', 'Washington', 'DC', '20009', 1)
+       )
+       SELECT count(*) = 1 AND max(p.state) = 'DC' AND max(p.rating) <= 20
+          AND bool_and(abs(p.longitude - t.longitude) < 0.0005
+                   AND abs(p.latitude - t.latitude) < 0.0005)
+       FROM p, t"
+
+    # Left unsplit, a zip+4 matches nothing in zip_state and the result takes
+    # the zip penalty, so equal ratings show the split happened.
+    expect_true "a nine-digit zip geocodes as well as its five-digit prefix" \
+      "WITH five AS (
+         SELECT rating
+         FROM api.geocode_parts('1731', 'New Hampshire', 'Ave', NULL, 'NW', 'Washington', 'DC', '20009', 1)
+       ), nine AS (
+         SELECT rating
+         FROM api.geocode_parts('1731', 'New Hampshire', 'Ave', NULL, 'NW', 'Washington', 'DC', '20009-1234', 1)
+       )
+       SELECT count(*) = 1 AND bool_and(five.rating = nine.rating)
+       FROM five, nine"
 
     # The round trip is the real test of both functions: a wrong SRID or a
     # swapped lon/lat argument passes every check above and fails this one.

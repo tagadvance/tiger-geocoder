@@ -59,8 +59,17 @@ geocoder=# SELECT * FROM api.geocode('1731 New Hampshire Ave NW, Washington, DC'
 | Function | Returns |
 | --- | --- |
 | `api.geocode(address text, max_results int = 1)` | `rating`, `longitude`, `latitude`, address parts, `formatted` |
+| `api.geocode_parts(house_number, street_name, street_suffix, pre_direction, post_direction, city_name, state_code, zip_code text, max_results int = 1)` | as `api.geocode` |
 | `api.reverse_geocode(longitude float8, latitude float8, max_results int = 1)` | `distance_metres`, address parts, `formatted` |
 | `api.coverage()` | one row per state loaded, with TIGER vintage and load time |
+
+`api.geocode_parts` takes the address already split into components and
+bypasses the free-text parser; use it whenever you hold the components, because
+on input without a city (`600 N Sheridan St, 61832`) the parser misassigns the
+trailing tokens — street `N`, city `Sheridan St` — on about a quarter of
+inputs. Everything after `street_name` is optional, `street_suffix` is the
+abbreviated type TIGER stores (`St`, `Ave`), and `zip_code` may be five or nine
+digits.
 
 Coordinates come back as **WGS84** (EPSG:4326) — the ordinary latitude and
 longitude that GPS, web maps and GeoJSON use, so they can be handed straight to
