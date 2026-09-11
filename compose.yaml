@@ -52,7 +52,10 @@ services:
     # Checking pg_isready alone is not enough. If an initdb hook fails, the
     # entrypoint aborts, restart policy brings the container back, the now
     # non-empty data directory makes it skip initialization -- and a database
-    # missing every extension reports healthy forever. Prove the schema landed.
+    # missing every extension reports healthy forever. Prove the schema landed:
+    # probe objects created by the LAST files initdb applies (20-verify.sql and
+    # 30-performance-fixes.sql), not the first, or a failure in a later file
+    # leaves a container healthy with the verifier or the fixes missing.
     healthcheck:
       test:
         - CMD-SHELL
@@ -60,7 +63,8 @@ services:
           pg_isready --quiet --username=$${POSTGRES_USER} --dbname=$${POSTGRES_DB}
           && psql --username=$${POSTGRES_USER} --dbname=$${POSTGRES_DB}
           --no-align --tuples-only --set ON_ERROR_STOP=1
-          --command "SELECT 1 WHERE to_regproc('api.coverage') IS NOT NULL"
+          --command "SELECT 1 WHERE to_regproc('api.record_not_published') IS NOT NULL
+          AND (SELECT prosrc LIKE '%substring(trim(%' FROM pg_proc WHERE proname = 'least_hn')"
           | grep --quiet 1
       interval: 10s
       timeout: 5s
