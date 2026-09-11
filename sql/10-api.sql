@@ -88,19 +88,21 @@ BEGIN
 	--
 	-- zip_state is built per state from that state's own edges, so a zip whose
 	-- delivery area crosses a state line is claimed by both: 68355 (Falls City,
-	-- NE) also appears under KS. The USPS assigns three-digit prefixes by
-	-- state, and the owning state has far more zips under the prefix than the
-	-- neighbour it spills into (683: 71 NE, 7 KS), so that census decides and
-	-- the parsed state breaks whatever tie remains.
+	-- NE) also appears under KS. A parsed state that claims the zip is honoured
+	-- -- 83414 is Alta, WY, served from Idaho under an Idaho prefix, and a
+	-- caller who says WY is right. Otherwise the USPS assigns three-digit
+	-- prefixes by state, and the owning state has far more zips under the
+	-- prefix than the neighbour it spills into (683: 71 NE, 7 KS), so that
+	-- census decides.
 	addy.stateabbrev := COALESCE((
 		SELECT z.stusps
 		FROM zip_state AS z
 		WHERE z.zip = addy.zip
-		ORDER BY (SELECT count(*)
+		ORDER BY z.stusps = addy.stateabbrev DESC,
+		         (SELECT count(*)
 		          FROM zip_state AS p
 		          WHERE p.stusps = z.stusps
 		            AND p.zip BETWEEN left(addy.zip, 3) || '00' AND left(addy.zip, 3) || '99') DESC,
-		         z.stusps = addy.stateabbrev DESC,
 		         z.stusps
 		LIMIT 1
 	), addy.stateabbrev);
