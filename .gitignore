@@ -8,8 +8,10 @@
 /data/
 /gisdata/
 
-# Snapshots produced by `make snapshot`.
+# Snapshots produced by `make snapshot`, and archives of the download cache.
 /tiger-geocoder-*.tar.zst
+*.tar
+*.sha256
 
 # Local configuration and secrets.
 .env
