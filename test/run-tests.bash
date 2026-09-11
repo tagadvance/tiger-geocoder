@@ -162,6 +162,13 @@ else
                    AND abs(p.latitude - t.latitude) < 0.0005)
        FROM p, t"
 
+    # 20009 is a DC zip; the state says otherwise. Upstream trusts the state,
+    # which with only DC loaded means no match at all -- the same path a
+    # misparsed 'NE' or 'Co' takes on a full load, minus the wrong answer.
+    expect_true "a zip that contradicts the parsed state wins" \
+      "SELECT count(*) = 1 AND max(state) = 'DC'
+       FROM api.geocode('1731 New Hampshire Ave NW, Washington, MD 20009', 1)"
+
     # Left unsplit, a zip+4 matches nothing in zip_state and the result takes
     # the zip penalty, so equal ratings show the split happened.
     expect_true "a nine-digit zip geocodes as well as its five-digit prefix" \

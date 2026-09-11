@@ -69,7 +69,9 @@ on input without a city (`600 N Sheridan St, 61832`) the parser misassigns the
 trailing tokens — street `N`, city `Sheridan St` — on about a quarter of
 inputs. Everything after `street_name` is optional, `street_suffix` is the
 abbreviated type TIGER stores (`St`, `Ave`), and `zip_code` may be five or nine
-digits.
+digits. The text form trusts the zip over a parsed state: the parser reads
+any trailing two-letter token as one (`1701 21st Rd NE, 66871` became
+Nebraska), and upstream would return a confident match from the wrong state.
 
 Coordinates come back as **WGS84** (EPSG:4326) — the ordinary latitude and
 longitude that GPS, web maps and GeoJSON use, so they can be handed straight to

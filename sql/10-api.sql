@@ -71,13 +71,31 @@ RETURNS TABLE (
 	zip text,
 	formatted text
 )
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 PARALLEL SAFE
 SET search_path = tiger, public
 AS $$
-	SELECT *
-	FROM api.geocode_normalized(normalize_address(geocode.address), geocode.max_results);
+DECLARE
+	addy tiger.norm_addy := normalize_address(address);
+BEGIN
+	-- The parser takes any trailing two-letter token for a state: "1701 21st
+	-- Rd NE, 66871" becomes Nebraska and "998 2500 N Shelby Co, 62550" becomes
+	-- Colorado, and geocode_address then trusts that state over the zip and
+	-- returns a confidently rated match from the wrong one. The zip is the
+	-- more reliable of the two, so where they disagree it wins. The ORDER BY
+	-- keeps the parsed state when the zip legitimately spans two states; an
+	-- unknown zip leaves the parse untouched.
+	addy.stateabbrev := COALESCE((
+		SELECT z.stusps
+		FROM zip_state AS z
+		WHERE z.zip = addy.zip
+		ORDER BY z.stusps = addy.stateabbrev DESC, z.stusps
+		LIMIT 1
+	), addy.stateabbrev);
+
+	RETURN QUERY SELECT * FROM api.geocode_normalized(addy, max_results);
+END;
 $$;
 
 COMMENT ON FUNCTION api.geocode(text, integer) IS
